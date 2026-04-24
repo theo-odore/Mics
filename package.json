@@ -1,0 +1,34 @@
+{
+  "name": "musicapp",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2",
+    "vite": "^8.0.10"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.3.1",
+    "@capacitor/cli": "^8.3.1",
+    "@capacitor/core": "^8.3.1",
+    "@distube/ytdl-core": "^4.16.12",
+    "@vitejs/plugin-react": "^6.0.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "jsmediatags": "^3.9.7",
+    "play-dl": "^1.9.7",
+    "puppeteer": "^24.42.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "youtube-dl-exec": "^3.1.5",
+    "youtube-sr": "^4.3.12",
+    "ytmusic-api": "^5.3.1"
+  }
+}

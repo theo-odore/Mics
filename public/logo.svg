@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Arch -->
+  <path d="M 20 50 A 30 30 0 0 1 80 50" stroke="white" stroke-width="8" stroke-linecap="round" />
+  
+  <!-- Earcups -->
+  <rect x="12" y="46" width="16" height="32" rx="8" fill="white" />
+  <rect x="72" y="46" width="16" height="32" rx="8" fill="white" />
+  
+  <!-- Audio Bars (5 bars) -->
+  <!-- Bar 1 (Left) -->
+  <rect x="32" y="42" width="6" height="36" rx="3" fill="white" />
+  <!-- Bar 2 -->
+  <rect x="40" y="52" width="6" height="16" rx="3" fill="white" />
+  <!-- Bar 3 (Center) -->
+  <rect x="48" y="46" width="6" height="28" rx="3" fill="white" />
+  <!-- Bar 4 -->
+  <rect x="56" y="54" width="6" height="12" rx="3" fill="white" />
+  <!-- Bar 5 (Right) -->
+  <rect x="64" y="42" width="6" height="36" rx="3" fill="white" />
+</svg>

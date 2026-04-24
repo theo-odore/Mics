@@ -1,0 +1,11 @@
+{
+  "appId": "com.phoenix.musicplayer",
+  "appName": "Mics",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}
