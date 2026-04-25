@@ -60,15 +60,6 @@ export default function App() {
     audio.addEventListener('pause', () => { setIsPlaying(false); stopRAF() })
     audio.addEventListener('waiting', () => setIsLoading(true))
     audio.addEventListener('canplay', () => setIsLoading(false))
-    audio.addEventListener('ended', () => {
-      stopRAF()
-      if (repeat === 2) {
-        audio.currentTime = 0
-        audio.play()
-      } else {
-        playNextRef.current?.()
-      }
-    })
     audio.addEventListener('error', (e) => {
       console.error('Audio error:', e)
       setIsLoading(false)

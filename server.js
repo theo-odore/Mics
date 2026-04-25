@@ -12,6 +12,19 @@ const PORT = 3001
 app.use(cors())
 app.use(express.json())
 
+// ===== Helper for Bulletproof Thumbnail Extraction =====
+function getThumbnailUrl(v) {
+  let url = '';
+  if (v.thumbnails && Array.isArray(v.thumbnails) && v.thumbnails.length > 0) {
+    url = v.thumbnails[v.thumbnails.length - 1].url || '';
+  } else if (Array.isArray(v.thumbnail) && v.thumbnail.length > 0) {
+    url = v.thumbnail[v.thumbnail.length - 1].url || '';
+  } else if (typeof v.thumbnail === 'string') {
+    url = v.thumbnail;
+  }
+  return typeof url === 'string' ? url.replace(/=w\d+-h\d+.*/, '=w800-h800-l90-rj') : '';
+}
+
 // ===== Search YouTube Music =====
 app.get('/api/search', async (req, res) => {
   const q = req.query.q
@@ -24,7 +37,7 @@ app.get('/api/search', async (req, res) => {
         id: v.videoId,
         title: v.name || '',
         artist: v.artist?.name || '',
-        thumbnail: (v.thumbnails?.pop()?.url || '').replace(/=w\d+-h\d+.*/, '=w800-h800-l90-rj'),
+        thumbnail: getThumbnailUrl(v),
         duration: v.duration || 0,
         views: 0, // Not provided by YTMusic
       }))
@@ -51,7 +64,7 @@ app.get('/api/suggestions/:id', async (req, res) => {
         id: v.videoId,
         title: v.title || '',
         artist: v.artists || '',
-        thumbnail: (v.thumbnail || '').replace(/=w\d+-h\d+.*/, '=w800-h800-l90-rj'),
+        thumbnail: getThumbnailUrl(v),
         duration: durationSec,
         views: 0,
       }
@@ -264,7 +277,7 @@ app.get('/api/trending', async (req, res) => {
         id: v.videoId,
         title: v.name || '',
         artist: v.artist?.name || '',
-        thumbnail: (v.thumbnails?.pop()?.url || '').replace(/=w\d+-h\d+.*/, '=w800-h800-l90-rj'),
+        thumbnail: getThumbnailUrl(v),
         duration: v.duration || 0,
         views: 0,
       }))
