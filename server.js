@@ -1,10 +1,6 @@
 import express from 'express'
 import cors from 'cors'
-import YTMusic from 'ytmusic-api'
-
-const ytm = new YTMusic()
-// Initialize YTMusic in the background
-ytm.initialize()
+import YouTube from 'youtube-sr'
 
 const app = express()
 const PORT = 3001
@@ -15,14 +11,10 @@ app.use(express.json())
 // ===== Helper for Bulletproof Thumbnail Extraction =====
 function getThumbnailUrl(v) {
   let url = '';
-  if (v.thumbnails && Array.isArray(v.thumbnails) && v.thumbnails.length > 0) {
-    url = v.thumbnails[v.thumbnails.length - 1].url || '';
-  } else if (Array.isArray(v.thumbnail) && v.thumbnail.length > 0) {
-    url = v.thumbnail[v.thumbnail.length - 1].url || '';
-  } else if (typeof v.thumbnail === 'string') {
-    url = v.thumbnail;
+  if (v.thumbnail && v.thumbnail.url) {
+    url = v.thumbnail.url;
   }
-  return typeof url === 'string' ? url.replace(/=w\d+-h\d+.*/, '=w800-h800-l90-rj') : '';
+  return typeof url === 'string' ? url.replace(/=w\d+-h\d+[^?]*/, '=w800-h800-l90-rj') : '';
 }
 
 // ===== Search YouTube Music =====
@@ -31,16 +23,15 @@ app.get('/api/search', async (req, res) => {
   if (!q) return res.json([])
 
   try {
-    const results = await ytm.searchSongs(q)
-    const tracks = results
-      .map(v => ({
-        id: v.videoId,
-        title: v.name || '',
-        artist: v.artist?.name || '',
-        thumbnail: getThumbnailUrl(v),
-        duration: v.duration || 0,
-        views: 0, // Not provided by YTMusic
-      }))
+    const results = await YouTube.default.search(q, { type: 'video', limit: 30 })
+    const tracks = results.map(v => ({
+      id: v.id,
+      title: v.title || '',
+      artist: v.channel?.name || '',
+      thumbnail: getThumbnailUrl(v) || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
+      duration: Math.floor(v.duration / 1000) || 0,
+      views: v.views || 0,
+    }))
     res.json(tracks)
   } catch (err) {
     console.error('Search error:', err.message)
@@ -51,24 +42,20 @@ app.get('/api/search', async (req, res) => {
 // ===== Get Suggestions (Up Next) =====
 app.get('/api/suggestions/:id', async (req, res) => {
   try {
-    const results = await ytm.getUpNexts(req.params.id)
-    const tracks = results.map(v => {
-      // Convert duration "3:59" to seconds 239
-      let durationSec = 0
-      if (v.duration) {
-        const parts = v.duration.split(':').map(Number)
-        if (parts.length === 2) durationSec = parts[0] * 60 + parts[1]
-        else if (parts.length === 3) durationSec = parts[0] * 3600 + parts[1] * 60 + parts[2]
-      }
-      return {
-        id: v.videoId,
-        title: v.title || '',
-        artist: v.artists || '',
-        thumbnail: getThumbnailUrl(v),
-        duration: durationSec,
-        views: 0,
-      }
-    })
+    const video = await YouTube.default.getVideo(`https://youtube.com/watch?v=${req.params.id}`)
+    
+    // Fallback: search using channel name if suggestions are not explicitly available
+    const searchQ = video.channel?.name ? `${video.channel.name} song` : 'top music'
+    const results = await YouTube.default.search(searchQ, { type: 'video', limit: 15 })
+    
+    const tracks = results.filter(v => v.id !== req.params.id).map(v => ({
+      id: v.id,
+      title: v.title || '',
+      artist: v.channel?.name || '',
+      thumbnail: getThumbnailUrl(v) || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
+      duration: Math.floor(v.duration / 1000) || 0,
+      views: v.views || 0,
+    }))
     res.json(tracks)
   } catch (err) {
     console.error('Suggestions error:', err.message)
@@ -76,36 +63,22 @@ app.get('/api/suggestions/:id', async (req, res) => {
   }
 })
 
-// ===== Get Lyrics =====
-app.get('/api/lyrics/:id', async (req, res) => {
+// ===== Trending / Explore Feeds =====
+app.get('/api/trending', async (req, res) => {
   try {
-    const lyrics = await ytm.getLyrics(req.params.id)
-    res.json(lyrics || [])
+    // Search for trending music to simulate trending feed
+    const results = await YouTube.default.search('top hit songs 2026 official music video', { type: 'video', limit: 20 })
+    const tracks = results.map(v => ({
+      id: v.id,
+      title: v.title || '',
+      artist: v.channel?.name || '',
+      thumbnail: getThumbnailUrl(v) || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
+      duration: Math.floor(v.duration / 1000) || 0,
+      views: v.views || 0,
+    }))
+    res.json(tracks)
   } catch (err) {
-    console.error('Lyrics error:', err.message)
-    res.json([])
-  }
-})
-
-// ===== Search Autocomplete =====
-app.get('/api/search/suggestions', async (req, res) => {
-  try {
-    const q = req.query.q
-    if (!q) return res.json([])
-    const suggestions = await ytm.getSearchSuggestions(q)
-    res.json(suggestions || [])
-  } catch (err) {
-    res.json([])
-  }
-})
-
-// ===== Explore Algorithms (Home Feeds) =====
-app.get('/api/explore', async (req, res) => {
-  try {
-    const sections = await ytm.getHomeSections()
-    res.json(sections || [])
-  } catch (err) {
-    console.error('Explore error:', err.message)
+    console.error('Trending error:', err.message)
     res.json([])
   }
 })
@@ -267,26 +240,7 @@ app.get('/api/stream/:id', async (req, res) => {
   }
 })
 
-// ===== Trending =====
-app.get('/api/trending', async (req, res) => {
-  try {
-    const results = await ytm.searchSongs('popular english hit songs')
-    const tracks = results
-      .slice(0, 12)
-      .map(v => ({
-        id: v.videoId,
-        title: v.name || '',
-        artist: v.artist?.name || '',
-        thumbnail: getThumbnailUrl(v),
-        duration: v.duration || 0,
-        views: 0,
-      }))
-    res.json(tracks)
-  } catch (err) {
-    console.error('Trending error:', err.message)
-    res.json([])
-  }
-})
+
 
 app.listen(PORT, () => {
   console.log(`\n  🎵 Mics Server running at http://localhost:${PORT}`)

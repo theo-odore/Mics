@@ -22,6 +22,9 @@ export default function App() {
   const [activeNav, setActiveNav] = useState('home')
   const [shuffle, setShuffle] = useState(false)
   const [repeat, setRepeat] = useState(0)
+  const [volume, setVolume] = useState(1)
+  const [showOptions, setShowOptions] = useState(false)
+  const [sleepTimer, setSleepTimer] = useState(null)
   
   const [liked, setLiked] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem('mics_liked') || '[]')) }
@@ -48,8 +51,34 @@ export default function App() {
   const rafRef = useRef(null)
   const searchTimerRef = useRef(null)
   const playNextRef = useRef(null)
+  const lastAddedTrackIdRef = useRef(null)
+  const sleepTimeoutRef = useRef(null)
 
-  // ===== Audio Engine =====
+  // ===== Options Handlers =====
+  const handleSleepTimer = (value) => {
+    if (sleepTimeoutRef.current) clearTimeout(sleepTimeoutRef.current)
+    
+    if (sleepTimer === value) {
+      // Toggle off
+      setSleepTimer(null)
+      return
+    }
+
+    setSleepTimer(value)
+    
+    if (value !== 'End of Track') {
+      const mins = parseInt(value)
+      if (!isNaN(mins)) {
+        sleepTimeoutRef.current = setTimeout(() => {
+          setIsPlaying(false)
+          setSleepTimer(null)
+          if (audioRef.current) audioRef.current.pause()
+        }, mins * 60 * 1000)
+      }
+    }
+  }
+
+  // ===== Render functions =====
   useEffect(() => {
     const audio = new Audio()
     audio.preload = 'auto'
@@ -74,6 +103,14 @@ export default function App() {
     if (!audio) return
     const handler = () => {
       stopRAF()
+      
+      // If sleep timer is 'End of Track', pause instead of playing next
+      if (sleepTimer === 'End of Track') {
+        setIsPlaying(false)
+        setSleepTimer(null)
+        return
+      }
+
       if (repeat === 2) {
         audio.currentTime = 0
         audio.play()
@@ -83,7 +120,14 @@ export default function App() {
     }
     audio.addEventListener('ended', handler)
     return () => audio.removeEventListener('ended', handler)
-  }, [repeat])
+  }, [repeat, sleepTimer])
+
+  // Sync volume state with audio element
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume
+    }
+  }, [volume])
 
   const updateProgress = useCallback(() => {
     const audio = audioRef.current
@@ -122,6 +166,43 @@ export default function App() {
     localStorage.setItem('mics_recent', JSON.stringify(recentlyPlayed))
   }, [recentlyPlayed])
 
+  // Reset the increment tracker when track changes
+  useEffect(() => {
+    lastAddedTrackIdRef.current = null
+  }, [currentTrack?.id])
+
+  // ===== Highly Played Tracks (Jump back in) =====
+  useEffect(() => {
+    if (currentTrack && currentTime > 30 && lastAddedTrackIdRef.current !== currentTrack.id) {
+      lastAddedTrackIdRef.current = currentTrack.id // Mark as counted for this play session
+      
+      setRecentlyPlayed(prev => {
+        let exists = false
+        const updated = prev.map(t => {
+          if (t.id === currentTrack.id) {
+            exists = true
+            return { ...t, playCount: (t.playCount || 1) + 1, lastPlayed: Date.now() }
+          }
+          return t
+        })
+        
+        if (!exists) {
+          updated.push({ ...currentTrack, playCount: 1, lastPlayed: Date.now() })
+        }
+        
+        // Sort by play count (highly played), then by most recent tie-breaker
+        updated.sort((a, b) => {
+          const countB = b.playCount || 1
+          const countA = a.playCount || 1
+          if (countB !== countA) return countB - countA
+          return (b.lastPlayed || 0) - (a.lastPlayed || 0)
+        })
+        
+        return updated.slice(0, 30)
+      })
+    }
+  }, [currentTrack, currentTime])
+
   // ===== Search =====
   const handleSearch = useCallback((q) => {
     setSearch(q)
@@ -153,11 +234,6 @@ export default function App() {
     audio.src = `${API}/stream/${track.id}`
     audio.load()
     audio.play().catch((err) => console.error('Audio play error:', err))
-
-    setRecentlyPlayed(prev => {
-      const filtered = prev.filter(t => t.id !== track.id)
-      return [track, ...filtered].slice(0, 30)
-    })
 
     if (!fromQueue) {
       fetch(`${API}/suggestions/${track.id}`)
@@ -225,6 +301,17 @@ export default function App() {
     setProgress(pct * 100)
     setCurrentTime(audio.currentTime)
   }, [duration])
+
+  const handleVolume = useCallback((e) => {
+    const bounds = e.currentTarget.getBoundingClientRect()
+    const x = Math.max(0, Math.min(e.clientX - bounds.left, bounds.width))
+    const pct = x / bounds.width
+    setVolume(pct)
+  }, [])
+
+  const toggleMute = useCallback(() => {
+    setVolume(v => v > 0 ? 0 : 1)
+  }, [])
 
   const toggleLike = useCallback((e, track) => {
     e.stopPropagation()
@@ -348,11 +435,11 @@ export default function App() {
           {/* HOME VIEW */}
           {activeNav === 'home' && (
             <>
-              {recentlyPlayed.length > 0 && (
+              {recentlyPlayed.filter(t => (t.playCount || 0) > 1).length > 0 && (
                 <section className="mb-12">
                   <h2 className="font-headline-md text-2xl font-bold text-white mb-6">Jump back in</h2>
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                    {recentlyPlayed.slice(0, 5).map(track => renderTrackCard(track))}
+                    {recentlyPlayed.filter(t => (t.playCount || 0) > 1).slice(0, 5).map(track => renderTrackCard(track))}
                   </div>
                 </section>
               )}
@@ -551,8 +638,10 @@ export default function App() {
           
           <div className="w-full flex items-center gap-3">
             <span className="text-[11px] text-zinc-400 w-8 text-right">{formatTime(currentTime)}</span>
-            <div className="h-1.5 flex-1 bg-zinc-800 rounded-full overflow-hidden group cursor-pointer relative" onClick={handleSeek}>
-              <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full relative" style={{ width: `${progress}%` }}></div>
+            <div className="flex-1 h-10 flex items-center cursor-pointer group" onClick={handleSeek}>
+              <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden relative pointer-events-none">
+                <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full" style={{ width: `${progress}%` }}></div>
+              </div>
             </div>
             <span className="text-[11px] text-zinc-400 w-8">{formatTime(duration)}</span>
           </div>
@@ -560,13 +649,20 @@ export default function App() {
 
         {/* Volume & Extras (Desktop) */}
         <div className="flex items-center justify-end gap-4 w-1/3 hidden md:flex text-zinc-400">
+          <button onClick={() => setShowOptions(true)} className="hover:text-white hover:scale-110 transition-transform">
+            <Icon name="settings" className="text-[20px]" />
+          </button>
           <button onClick={() => setActiveNav('queue')} className={`hover:text-white hover:scale-110 transition-transform ${activeNav === 'queue' ? 'text-primary' : ''}`}>
             <Icon name="queue_music" className="text-[20px]" />
           </button>
           <div className="flex items-center gap-2 w-24">
-            <Icon name="volume_up" className="text-[18px]" />
-            <div className="h-1.5 flex-1 bg-zinc-800 rounded-full overflow-hidden cursor-pointer">
-              <div className="h-full bg-white rounded-full w-2/3"></div>
+            <button onClick={toggleMute} className="hover:text-white transition-colors flex items-center">
+              <Icon name={volume === 0 ? "volume_off" : volume < 0.5 ? "volume_down" : "volume_up"} className="text-[18px]" />
+            </button>
+            <div className="flex-1 h-10 flex items-center cursor-pointer group" onClick={handleVolume}>
+              <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden relative pointer-events-none">
+                <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full" style={{ width: `${volume * 100}%` }}></div>
+              </div>
             </div>
           </div>
         </div>
@@ -589,6 +685,112 @@ export default function App() {
         </button>
       </nav>
       
+      {/* Player Options Modal */}
+      {showOptions && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowOptions(false)}>
+          <div className="bg-[#121212] w-full max-w-md rounded-[20px] shadow-2xl border border-neutral-800/50 overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-6 border-b border-neutral-800/50 flex justify-between items-center">
+              <h2 className="font-headline-md text-white font-bold text-lg">Player Options</h2>
+              <button onClick={() => setShowOptions(false)} className="hover:text-white transition-colors text-neutral-400">
+                <Icon name="close" />
+              </button>
+            </div>
+            
+            <div className="max-h-[70vh] overflow-y-auto no-scrollbar pb-6">
+              {currentTrack && (
+                <div className="p-6 flex items-center gap-4 bg-[#1a1a1a]">
+                  <img src={currentTrack.thumbnail} className="w-16 h-16 rounded-lg object-cover shadow-md" alt="Thumbnail" />
+                  <div className="min-w-0 flex-1">
+                    <h3 className="font-bold text-white truncate">{currentTrack.title}</h3>
+                    <p className="text-sm text-neutral-400 truncate">{currentTrack.artist}</p>
+                  </div>
+                </div>
+              )}
+              
+              <div className="p-6 space-y-4">
+                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Sleep Timer</h4>
+                <div className="space-y-2">
+                  {['5 minutes', '10 minutes', '30 minutes', '60 minutes', 'End of Track'].map(t => (
+                    <div 
+                      key={t} 
+                      onClick={() => handleSleepTimer(t)}
+                      className={`flex justify-between items-center py-2 text-sm cursor-pointer transition-colors ${sleepTimer === t ? 'text-primary font-bold' : 'text-neutral-300 hover:text-white'}`}
+                    >
+                      <span>{t}</span>
+                      {sleepTimer === t && <Icon name="check" className="text-sm" />}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              
+              <div className="h-px bg-neutral-800 mx-6"></div>
+              
+              <div className="p-6 space-y-4">
+                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Playback</h4>
+                <div className="space-y-6">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-white">Crossfade</span>
+                    <div className="w-10 h-5 bg-zinc-800 rounded-full relative cursor-pointer">
+                      <div className="absolute left-1 top-1 w-3 h-3 bg-neutral-400 rounded-full"></div>
+                    </div>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-white">Gapless Playback</span>
+                    <div className="w-10 h-5 bg-primary rounded-full relative cursor-pointer">
+                      <div className="absolute right-1 top-1 w-3 h-3 bg-black rounded-full"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="h-px bg-neutral-800 mx-6"></div>
+              
+              <div className="p-6 space-y-4">
+                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Queue Management</h4>
+                <div className="grid grid-cols-1 gap-2">
+                  <button onClick={() => { setQueue([]); setShowOptions(false); }} className="flex items-center gap-3 w-full py-3 px-4 bg-[#282828] hover:bg-[#333333] transition-colors rounded-lg text-sm text-white font-medium">
+                    <Icon name="delete_sweep" className="text-lg" /> Clear current queue
+                  </button>
+                  <button className="flex items-center gap-3 w-full py-3 px-4 bg-[#282828] hover:bg-[#333333] transition-colors rounded-lg text-sm text-white font-medium">
+                    <Icon name="playlist_add" className="text-lg" /> Save queue as playlist
+                  </button>
+                  <button onClick={() => setShuffle(!shuffle)} className="flex items-center gap-3 w-full py-3 px-4 bg-[#282828] hover:bg-[#333333] transition-colors rounded-lg text-sm text-white font-medium">
+                    <Icon name="shuffle" className={`text-lg ${shuffle ? 'text-primary' : ''}`} /> Shuffle entire queue
+                  </button>
+                </div>
+              </div>
+              
+              <div className="h-px bg-neutral-800 mx-6"></div>
+              
+              <div className="p-6 space-y-4">
+                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Track Actions</h4>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-4 py-2 text-sm text-neutral-300 hover:text-white cursor-pointer">
+                    <Icon name="add_circle" /> <span>Add to playlist</span>
+                  </div>
+                  <div className="flex items-center gap-4 py-2 text-sm text-neutral-300 hover:text-white cursor-pointer">
+                    <Icon name="person" /> <span>Go to artist</span>
+                  </div>
+                  <div className="flex items-center gap-4 py-2 text-sm text-neutral-300 hover:text-white cursor-pointer">
+                    <Icon name="share" /> <span>Share track</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="h-px bg-neutral-800 mx-6"></div>
+              
+              <div className="p-6 space-y-4">
+                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Audio Quality</h4>
+                <div className="flex gap-2">
+                  <button className="flex-1 py-2 text-[11px] font-bold uppercase tracking-widest border border-neutral-700 rounded-full text-neutral-400 hover:text-white hover:border-neutral-500 transition-all">Low</button>
+                  <button className="flex-1 py-2 text-[11px] font-bold uppercase tracking-widest border border-neutral-700 rounded-full text-neutral-400 hover:text-white hover:border-neutral-500 transition-all">Normal</button>
+                  <button className="flex-1 py-2 text-[11px] font-bold uppercase tracking-widest bg-primary text-black border border-primary rounded-full shadow-[0_0_15px_rgba(29,185,84,0.3)]">High</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
