@@ -1,6 +1,22 @@
 import express from 'express'
 import cors from 'cors'
-import YouTube from 'youtube-sr'
+import YTMusic from 'ytmusic-api'
+
+const ytm = new YTMusic()
+let ytmInitialized = false;
+
+// Initialize YTMusic properly to prevent 400 errors
+ytm.initialize().then(() => {
+  ytmInitialized = true;
+  console.log('✅ YTMusic API Initialized successfully');
+}).catch(err => console.error('❌ YTMusic Init error:', err.message));
+
+async function ensureYtm() {
+  if (!ytmInitialized) {
+    await ytm.initialize();
+    ytmInitialized = true;
+  }
+}
 
 const app = express()
 const PORT = 3001
@@ -11,7 +27,9 @@ app.use(express.json())
 // ===== Helper for Bulletproof Thumbnail Extraction =====
 function getThumbnailUrl(v) {
   let url = '';
-  if (v.thumbnail && v.thumbnail.url) {
+  if (v.thumbnails && Array.isArray(v.thumbnails) && v.thumbnails.length > 0) {
+    url = v.thumbnails[v.thumbnails.length - 1].url || '';
+  } else if (v.thumbnail && v.thumbnail.url) {
     url = v.thumbnail.url;
   }
   return typeof url === 'string' ? url.replace(/=w\d+-h\d+[^?]*/, '=w800-h800-l90-rj') : '';
@@ -23,14 +41,15 @@ app.get('/api/search', async (req, res) => {
   if (!q) return res.json([])
 
   try {
-    const results = await YouTube.default.search(q, { type: 'video', limit: 30 })
+    await ensureYtm();
+    const results = await ytm.searchSongs(q)
     const tracks = results.map(v => ({
-      id: v.id,
-      title: v.title || '',
-      artist: v.channel?.name || '',
-      thumbnail: getThumbnailUrl(v) || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
-      duration: Math.floor(v.duration / 1000) || 0,
-      views: v.views || 0,
+      id: v.videoId,
+      title: v.name || '',
+      artist: v.artist?.name || '',
+      thumbnail: getThumbnailUrl(v) || `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+      duration: v.duration || 0,
+      views: 0,
     }))
     res.json(tracks)
   } catch (err) {
@@ -42,20 +61,27 @@ app.get('/api/search', async (req, res) => {
 // ===== Get Suggestions (Up Next) =====
 app.get('/api/suggestions/:id', async (req, res) => {
   try {
-    const video = await YouTube.default.getVideo(`https://youtube.com/watch?v=${req.params.id}`)
-    
-    // Fallback: search using channel name if suggestions are not explicitly available
-    const searchQ = video.channel?.name ? `${video.channel.name} song` : 'top music'
-    const results = await YouTube.default.search(searchQ, { type: 'video', limit: 15 })
-    
-    const tracks = results.filter(v => v.id !== req.params.id).map(v => ({
-      id: v.id,
-      title: v.title || '',
-      artist: v.channel?.name || '',
-      thumbnail: getThumbnailUrl(v) || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
-      duration: Math.floor(v.duration / 1000) || 0,
-      views: v.views || 0,
-    }))
+    await ensureYtm();
+    const results = await ytm.getUpNexts(req.params.id)
+    const tracks = results.map(v => {
+      // YTMusic api can sometimes return string '3:59' for duration or integers
+      let durationSec = 0
+      if (typeof v.duration === 'string') {
+        const parts = v.duration.split(':').map(Number)
+        if (parts.length === 2) durationSec = parts[0] * 60 + parts[1]
+        else if (parts.length === 3) durationSec = parts[0] * 3600 + parts[1] * 60 + parts[2]
+      } else if (typeof v.duration === 'number') {
+        durationSec = v.duration
+      }
+      return {
+        id: v.videoId,
+        title: v.title || v.name || '',
+        artist: v.artists?.map(a => a.name).join(', ') || v.artist?.name || '',
+        thumbnail: getThumbnailUrl(v) || `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+        duration: durationSec,
+        views: 0,
+      }
+    })
     res.json(tracks)
   } catch (err) {
     console.error('Suggestions error:', err.message)
@@ -66,15 +92,16 @@ app.get('/api/suggestions/:id', async (req, res) => {
 // ===== Trending / Explore Feeds =====
 app.get('/api/trending', async (req, res) => {
   try {
-    // Search for trending music to simulate trending feed
-    const results = await YouTube.default.search('top hit songs 2026 official music video', { type: 'video', limit: 20 })
+    await ensureYtm();
+    // Use ytmusic-api to search for popular songs since it doesn't have a direct trending endpoint that returns tracks array perfectly
+    const results = await ytm.searchSongs('popular hit songs')
     const tracks = results.map(v => ({
-      id: v.id,
-      title: v.title || '',
-      artist: v.channel?.name || '',
-      thumbnail: getThumbnailUrl(v) || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
-      duration: Math.floor(v.duration / 1000) || 0,
-      views: v.views || 0,
+      id: v.videoId,
+      title: v.name || '',
+      artist: v.artist?.name || '',
+      thumbnail: getThumbnailUrl(v) || `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+      duration: v.duration || 0,
+      views: 0,
     }))
     res.json(tracks)
   } catch (err) {
