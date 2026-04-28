@@ -38,6 +38,9 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState([])
   const [searching, setSearching] = useState(false)
+  const [suggestions, setSuggestions] = useState([])
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [homeSections, setHomeSections] = useState([])
   
   const [trending, setTrending] = useState([])
   const [recentlyPlayed, setRecentlyPlayed] = useState(() => {
@@ -50,9 +53,11 @@ export default function App() {
   const audioRef = useRef(null)
   const rafRef = useRef(null)
   const searchTimerRef = useRef(null)
+  const suggestTimerRef = useRef(null)
   const playNextRef = useRef(null)
   const lastAddedTrackIdRef = useRef(null)
   const sleepTimeoutRef = useRef(null)
+  const searchInputRef = useRef(null)
 
   // ===== Options Handlers =====
   const handleSleepTimer = (value) => {
@@ -148,11 +153,16 @@ export default function App() {
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null }
   }, [])
 
-  // ===== Load trending =====
+  // ===== Load trending + home sections =====
   useEffect(() => {
     fetch(`${API}/trending`)
       .then(r => r.json())
       .then(t => { if (t.length) setTrending(t) })
+      .catch(() => {})
+    
+    fetch(`${API}/home`)
+      .then(r => r.json())
+      .then(sections => { if (sections.length) setHomeSections(sections) })
       .catch(() => {})
   }, [])
 
@@ -207,7 +217,20 @@ export default function App() {
   const handleSearch = useCallback((q) => {
     setSearch(q)
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
-    if (!q.trim()) { setSearchResults([]); setSearching(false); return }
+    if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current)
+    if (!q.trim()) { setSearchResults([]); setSearching(false); setSuggestions([]); setShowSuggestions(false); return }
+    
+    // Fetch suggestions fast (150ms debounce)
+    suggestTimerRef.current = setTimeout(async () => {
+      try {
+        const r = await fetch(`${API}/search/suggestions?q=${encodeURIComponent(q)}`)
+        const data = await r.json()
+        setSuggestions(data)
+        setShowSuggestions(true)
+      } catch { setSuggestions([]) }
+    }, 150)
+    
+    // Full search (400ms debounce)
     setSearching(true)
     setActiveNav('search')
     searchTimerRef.current = setTimeout(async () => {
@@ -217,7 +240,20 @@ export default function App() {
         setSearchResults(data)
       } catch { setSearchResults([]) }
       setSearching(false)
-    }, 500)
+    }, 400)
+  }, [])
+
+  const submitSearch = useCallback((q) => {
+    setSearch(q)
+    setShowSuggestions(false)
+    setSuggestions([])
+    setSearching(true)
+    setActiveNav('search')
+    fetch(`${API}/search?q=${encodeURIComponent(q)}`)
+      .then(r => r.json())
+      .then(data => setSearchResults(data))
+      .catch(() => setSearchResults([]))
+      .finally(() => setSearching(false))
   }, [])
 
   // ===== Play Track =====
@@ -413,14 +449,42 @@ export default function App() {
         <header className="bg-zinc-950/90 backdrop-blur-md font-inter text-sm font-semibold sticky top-0 z-30 w-full flex justify-between items-center px-6 py-4">
           <div className="flex items-center gap-md w-full max-w-md">
             <div className="relative w-full">
-              <Icon name="search" className="absolute left-md top-1/2 -translate-y-1/2 text-zinc-400" />
+              <Icon name="search" className="absolute left-md top-1/2 -translate-y-1/2 text-zinc-400 z-10" />
               <input 
+                ref={searchInputRef}
                 value={search}
                 onChange={(e) => handleSearch(e.target.value)}
-                className="w-full bg-[#282828] text-white rounded-full py-sm pl-12 pr-md border-none focus:ring-2 focus:ring-primary-container text-body-md h-10 outline-none" 
-                placeholder="What do you want to listen to?" 
+                onFocus={() => { if (suggestions.length > 0) setShowSuggestions(true) }}
+                onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { submitSearch(search); e.target.blur() } }}
+                className="w-full bg-[#282828] text-white rounded-full py-sm pl-12 pr-10 border-none focus:ring-2 focus:ring-primary/50 text-body-md h-10 outline-none transition-all" 
+                placeholder="Search songs, artists, albums..." 
                 type="text"
               />
+              {search && (
+                <button 
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white transition-colors z-10"
+                  onClick={() => { setSearch(''); setSearchResults([]); setSuggestions([]); setShowSuggestions(false); searchInputRef.current?.focus() }}
+                >
+                  <Icon name="close" className="text-lg" />
+                </button>
+              )}
+              
+              {/* Search Suggestions Dropdown */}
+              {showSuggestions && suggestions.length > 0 && (
+                <div className="absolute top-full left-0 right-0 mt-2 bg-[#282828] rounded-xl shadow-2xl border border-zinc-700/50 overflow-hidden z-50 backdrop-blur-xl">
+                  {suggestions.map((s, i) => (
+                    <button
+                      key={i}
+                      className="flex items-center gap-3 w-full px-4 py-3 text-left hover:bg-zinc-700/50 transition-colors text-sm text-zinc-200 hover:text-white"
+                      onMouseDown={(e) => { e.preventDefault(); submitSearch(s) }}
+                    >
+                      <Icon name="search" className="text-zinc-500 text-base" />
+                      <span>{s}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           <div className="hidden md:flex items-center gap-lg">
@@ -535,6 +599,40 @@ export default function App() {
                   </div>
                 )}
               </section>
+
+              {/* YouTube Music Home Sections */}
+              {homeSections.map((section, si) => (
+                <section key={`section-${si}`} className="mb-12">
+                  <h2 className="font-headline-md text-2xl font-bold text-white mb-6">{section.title}</h2>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+                    {section.contents.filter(item => item.id && item.type === 'SONG').slice(0, 5).map(item => renderTrackCard(item))}
+                  </div>
+                  {/* Show playlist items as cards too */}
+                  {section.contents.filter(item => item.type === 'PLAYLIST').length > 0 && section.contents.filter(item => item.type === 'SONG').length === 0 && (
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+                      {section.contents.filter(item => item.type === 'PLAYLIST').slice(0, 5).map((item, pi) => (
+                        <div 
+                          key={`playlist-${si}-${pi}`}
+                          className="bg-zinc-900 p-md rounded-lg hover:bg-zinc-800 transition-colors cursor-pointer group relative"
+                          onClick={() => submitSearch(item.title)}
+                        >
+                          <div className="aspect-square w-full mb-md overflow-hidden rounded-md relative shadow-lg">
+                            {item.thumbnail ? (
+                              <img src={item.thumbnail} alt={item.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                            ) : (
+                              <div className="w-full h-full bg-gradient-to-br from-primary/30 to-emerald-900 flex items-center justify-center">
+                                <Icon name="queue_music" className="text-5xl text-white/40" />
+                              </div>
+                            )}
+                          </div>
+                          <h3 className="font-headline-md text-sm text-white truncate mb-1">{item.title}</h3>
+                          <p className="font-body-md text-xs text-zinc-400 truncate">{item.artist}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              ))}
             </>
           )}
 
@@ -592,76 +690,78 @@ export default function App() {
       </main>
 
       {/* Bottom Player (WEB & MOBILE) */}
-      <nav className="bg-zinc-950 text-white font-inter text-xs fixed bottom-0 w-full h-24 z-50 border-t border-zinc-800 flex justify-between items-center px-4 md:px-6">
+      <nav className="bg-zinc-950 text-white font-inter text-xs fixed bottom-0 w-full z-50 border-t border-zinc-800">
         
-        {/* Now Playing Info */}
-        <div className="flex items-center gap-md w-1/3 min-w-0">
-          {currentTrack ? (
-            <>
-              <img src={currentTrack.thumbnail} alt="Album Art" className="w-14 h-14 rounded-md object-cover hidden sm:block shadow-md" />
-              <div className="flex flex-col truncate px-2">
-                <span className="font-semibold text-sm text-white truncate">{currentTrack.title}</span>
-                <span className="text-xs text-zinc-400 truncate mt-0.5">{currentTrack.artist}</span>
-              </div>
-              <button onClick={(e) => toggleLike(e, currentTrack)} className="text-zinc-400 hover:text-white ml-2 hidden sm:block">
-                <Icon name="favorite" className={liked.has(currentTrack.id) ? "text-primary" : ""} />
+        <div className="flex items-center justify-between h-[72px] px-4 md:px-6">
+          {/* Now Playing Info */}
+          <div className="flex items-center gap-3 w-[30%] min-w-0">
+            {currentTrack ? (
+              <>
+                <img src={currentTrack.thumbnail} alt="Album Art" className="w-12 h-12 rounded-md object-cover hidden sm:block shadow-md flex-shrink-0" />
+                <div className="flex flex-col min-w-0 justify-center">
+                  <span className="font-semibold text-sm text-white truncate leading-tight">{currentTrack.title}</span>
+                  <span className="text-xs text-zinc-400 truncate leading-tight mt-0.5">{currentTrack.artist}</span>
+                </div>
+                <button onClick={(e) => toggleLike(e, currentTrack)} className="text-zinc-400 hover:text-white flex-shrink-0 hidden sm:block">
+                  <Icon name="favorite" className={liked.has(currentTrack.id) ? "text-primary text-xl" : "text-xl"} />
+                </button>
+              </>
+            ) : (
+              <div className="text-zinc-500 text-sm hidden sm:block">No track playing</div>
+            )}
+          </div>
+
+          {/* Controls & Scrubber */}
+          <div className="flex flex-col items-center justify-center w-full max-w-[480px] md:w-[40%] px-2">
+            <div className="flex items-center gap-5 mb-1">
+              <button onClick={() => setShuffle(!shuffle)} className={`hidden sm:block hover:scale-110 transition-transform ${shuffle ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
+                <Icon name="shuffle" className="text-xl" />
               </button>
-            </>
-          ) : (
-            <div className="text-zinc-500 text-sm hidden sm:block">No track playing</div>
-          )}
-        </div>
-
-        {/* Controls & Scrubber */}
-        <div className="flex flex-col items-center justify-center w-full max-w-md md:w-1/3">
-          <div className="flex items-center gap-4 md:gap-6 mb-2">
-            <button onClick={() => setShuffle(!shuffle)} className={`hidden sm:block hover:scale-110 transition-transform ${shuffle ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
-              <Icon name="shuffle" />
-            </button>
-            <button onClick={playPrev} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
-              <Icon name="skip_previous" />
-            </button>
-            <button onClick={togglePlay} className="text-black hover:scale-105 transition-transform bg-white rounded-full flex items-center justify-center p-2 w-10 h-10 shadow-lg">
-              {isLoading ? (
-                <div className="w-5 h-5 border-2 border-black border-t-transparent rounded-full animate-spin"></div>
-              ) : (
-                <Icon name={isPlaying ? "pause" : "play_arrow"} />
-              )}
-            </button>
-            <button onClick={playNext} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
-              <Icon name="skip_next" />
-            </button>
-            <button onClick={() => setRepeat((repeat + 1) % 3)} className={`hidden sm:block hover:scale-110 transition-transform ${repeat > 0 ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
-              <Icon name={repeat === 2 ? "repeat_one" : "repeat"} />
-            </button>
-          </div>
-          
-          <div className="w-full flex items-center gap-3">
-            <span className="text-[11px] text-zinc-400 w-8 text-right">{formatTime(currentTime)}</span>
-            <div className="flex-1 h-10 flex items-center cursor-pointer group" onClick={handleSeek}>
-              <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden relative pointer-events-none">
-                <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full" style={{ width: `${progress}%` }}></div>
-              </div>
+              <button onClick={playPrev} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
+                <Icon name="skip_previous" className="text-2xl" />
+              </button>
+              <button onClick={togglePlay} className="text-black hover:scale-105 transition-transform bg-white rounded-full flex items-center justify-center w-9 h-9 shadow-lg">
+                {isLoading ? (
+                  <div className="w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin"></div>
+                ) : (
+                  <Icon name={isPlaying ? "pause" : "play_arrow"} className="text-xl" />
+                )}
+              </button>
+              <button onClick={playNext} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
+                <Icon name="skip_next" className="text-2xl" />
+              </button>
+              <button onClick={() => setRepeat((repeat + 1) % 3)} className={`hidden sm:block hover:scale-110 transition-transform ${repeat > 0 ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
+                <Icon name={repeat === 2 ? "repeat_one" : "repeat"} className="text-xl" />
+              </button>
             </div>
-            <span className="text-[11px] text-zinc-400 w-8">{formatTime(duration)}</span>
+            
+            <div className="w-full flex items-center gap-2">
+              <span className="text-[11px] text-zinc-400 w-9 text-right tabular-nums">{formatTime(currentTime)}</span>
+              <div className="flex-1 h-4 flex items-center cursor-pointer group" onClick={handleSeek}>
+                <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden relative pointer-events-none group-hover:h-1.5 transition-all">
+                  <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full" style={{ width: `${progress}%` }}></div>
+                </div>
+              </div>
+              <span className="text-[11px] text-zinc-400 w-9 tabular-nums">{formatTime(duration)}</span>
+            </div>
           </div>
-        </div>
 
-        {/* Volume & Extras (Desktop) */}
-        <div className="flex items-center justify-end gap-4 w-1/3 hidden md:flex text-zinc-400">
-          <button onClick={() => setShowOptions(true)} className="hover:text-white hover:scale-110 transition-transform">
-            <Icon name="settings" className="text-[20px]" />
-          </button>
-          <button onClick={() => setActiveNav('queue')} className={`hover:text-white hover:scale-110 transition-transform ${activeNav === 'queue' ? 'text-primary' : ''}`}>
-            <Icon name="queue_music" className="text-[20px]" />
-          </button>
-          <div className="flex items-center gap-2 w-24">
-            <button onClick={toggleMute} className="hover:text-white transition-colors flex items-center">
-              <Icon name={volume === 0 ? "volume_off" : volume < 0.5 ? "volume_down" : "volume_up"} className="text-[18px]" />
+          {/* Volume & Extras (Desktop) */}
+          <div className="hidden md:flex items-center justify-end gap-3 w-[30%] text-zinc-400">
+            <button onClick={() => setShowOptions(true)} className="hover:text-white hover:scale-110 transition-transform">
+              <Icon name="settings" className="text-[20px]" />
             </button>
-            <div className="flex-1 h-10 flex items-center cursor-pointer group" onClick={handleVolume}>
-              <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden relative pointer-events-none">
-                <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full" style={{ width: `${volume * 100}%` }}></div>
+            <button onClick={() => setActiveNav('queue')} className={`hover:text-white hover:scale-110 transition-transform ${activeNav === 'queue' ? 'text-primary' : ''}`}>
+              <Icon name="queue_music" className="text-[20px]" />
+            </button>
+            <div className="flex items-center gap-2 w-28">
+              <button onClick={toggleMute} className="hover:text-white transition-colors flex items-center flex-shrink-0">
+                <Icon name={volume === 0 ? "volume_off" : volume < 0.5 ? "volume_down" : "volume_up"} className="text-[18px]" />
+              </button>
+              <div className="flex-1 h-4 flex items-center cursor-pointer group" onClick={handleVolume}>
+                <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden relative pointer-events-none group-hover:h-1.5 transition-all">
+                  <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full" style={{ width: `${volume * 100}%` }}></div>
+                </div>
               </div>
             </div>
           </div>
@@ -670,7 +770,7 @@ export default function App() {
       </nav>
       
       {/* Mobile Bottom Nav (replaces sidebar on small screens) */}
-      <nav className="md:hidden bg-zinc-900/95 backdrop-blur-md text-white fixed bottom-24 w-full h-16 z-40 border-t border-zinc-800 flex justify-around items-center px-2">
+      <nav className="md:hidden bg-zinc-900/95 backdrop-blur-md text-white fixed bottom-[72px] w-full h-14 z-40 border-t border-zinc-800 flex justify-around items-center px-2">
         <button onClick={() => setActiveNav('home')} className={`flex flex-col items-center p-2 ${activeNav === 'home' ? 'text-white' : 'text-zinc-500'}`}>
           <Icon name="home" />
         </button>
