@@ -9,6 +9,65 @@ function formatTime(s) {
   return `${m}:${sec.toString().padStart(2, '0')}`
 }
 
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v))
+}
+
+function normalizeRgb([r, g, b]) {
+  // Keep ambient colors soft and premium by avoiding both muddy darks and neon highs.
+  return [
+    clamp(Math.round(r * 0.75 + 45), 42, 205),
+    clamp(Math.round(g * 0.78 + 45), 42, 205),
+    clamp(Math.round(b * 0.8 + 45), 42, 205)
+  ]
+}
+
+async function extractCoverColor(imageUrl) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.referrerPolicy = 'no-referrer'
+
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas')
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })
+        const size = 56
+        canvas.width = size
+        canvas.height = size
+        ctx.drawImage(img, 0, 0, size, size)
+        const data = ctx.getImageData(0, 0, size, size).data
+
+        let r = 0
+        let g = 0
+        let b = 0
+        let count = 0
+
+        for (let i = 0; i < data.length; i += 4) {
+          const alpha = data[i + 3]
+          if (alpha < 90) continue
+          r += data[i]
+          g += data[i + 1]
+          b += data[i + 2]
+          count += 1
+        }
+
+        if (!count) {
+          resolve([29, 185, 84])
+          return
+        }
+
+        resolve(normalizeRgb([r / count, g / count, b / count]))
+      } catch {
+        resolve([29, 185, 84])
+      }
+    }
+
+    img.onerror = () => resolve([29, 185, 84])
+    img.src = imageUrl
+  })
+}
+
 function Icon({ name, className = '', ...props }) {
   return <span className={`material-symbols-outlined ${className}`} {...props}>{name}</span>
 }
@@ -22,9 +81,10 @@ export default function App() {
   const [activeNav, setActiveNav] = useState('home')
   const [shuffle, setShuffle] = useState(false)
   const [repeat, setRepeat] = useState(0)
-  const [volume, setVolume] = useState(1)
-  const [showOptions, setShowOptions] = useState(false)
-  const [sleepTimer, setSleepTimer] = useState(null)
+  const [ambientRgb, setAmbientRgb] = useState([29, 185, 84])
+  const [ambientIntensity, setAmbientIntensity] = useState(() => {
+    try { return parseFloat(localStorage.getItem('mics_ambient_intensity') || '0.27') } catch { return 0.27 }
+  })
   
   const [liked, setLiked] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem('mics_liked') || '[]')) }
@@ -38,9 +98,6 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState([])
   const [searching, setSearching] = useState(false)
-  const [suggestions, setSuggestions] = useState([])
-  const [showSuggestions, setShowSuggestions] = useState(false)
-  const [homeSections, setHomeSections] = useState([])
   
   const [trending, setTrending] = useState([])
   const [recentlyPlayed, setRecentlyPlayed] = useState(() => {
@@ -49,44 +106,27 @@ export default function App() {
   })
   const [queue, setQueue] = useState([])
   const [isLoading, setIsLoading] = useState(false)
+  const [volume, setVolume] = useState(() => {
+    try { return parseFloat(localStorage.getItem('mics_volume') || '1') } catch { return 1 }
+  })
+  const [isMuted, setIsMuted] = useState(false)
+  const prevVolumeRef = useRef(1)
 
   const audioRef = useRef(null)
   const rafRef = useRef(null)
   const searchTimerRef = useRef(null)
-  const suggestTimerRef = useRef(null)
   const playNextRef = useRef(null)
-  const lastAddedTrackIdRef = useRef(null)
-  const sleepTimeoutRef = useRef(null)
-  const searchInputRef = useRef(null)
+  const volumeBarRef = useRef(null)
+  const isVolumeScrubbingRef = useRef(false)
+  // Stores API-provided duration; fallback when audio.duration is Infinity (chunked stream)
+  const trackDurationRef = useRef(0)
 
-  // ===== Options Handlers =====
-  const handleSleepTimer = (value) => {
-    if (sleepTimeoutRef.current) clearTimeout(sleepTimeoutRef.current)
-    
-    if (sleepTimer === value) {
-      // Toggle off
-      setSleepTimer(null)
-      return
-    }
-
-    setSleepTimer(value)
-    
-    if (value !== 'End of Track') {
-      const mins = parseInt(value)
-      if (!isNaN(mins)) {
-        sleepTimeoutRef.current = setTimeout(() => {
-          setIsPlaying(false)
-          setSleepTimer(null)
-          if (audioRef.current) audioRef.current.pause()
-        }, mins * 60 * 1000)
-      }
-    }
-  }
-
-  // ===== Render functions =====
+  // ===== Audio Engine =====
   useEffect(() => {
     const audio = new Audio()
     audio.preload = 'auto'
+    // Restore persisted volume
+    try { audio.volume = parseFloat(localStorage.getItem('mics_volume') || '1') } catch { audio.volume = 1 }
     audioRef.current = audio
 
     audio.addEventListener('loadedmetadata', () => setDuration(audio.duration))
@@ -108,14 +148,6 @@ export default function App() {
     if (!audio) return
     const handler = () => {
       stopRAF()
-      
-      // If sleep timer is 'End of Track', pause instead of playing next
-      if (sleepTimer === 'End of Track') {
-        setIsPlaying(false)
-        setSleepTimer(null)
-        return
-      }
-
       if (repeat === 2) {
         audio.currentTime = 0
         audio.play()
@@ -125,21 +157,22 @@ export default function App() {
     }
     audio.addEventListener('ended', handler)
     return () => audio.removeEventListener('ended', handler)
-  }, [repeat, sleepTimer])
-
-  // Sync volume state with audio element
-  useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.volume = volume
-    }
-  }, [volume])
+  }, [repeat])
 
   const updateProgress = useCallback(() => {
     const audio = audioRef.current
-    if (audio && !audio.paused && audio.duration) {
-      setCurrentTime(audio.currentTime)
-      setDuration(audio.duration)
-      setProgress((audio.currentTime / audio.duration) * 100)
+    if (audio && !audio.paused && Number.isFinite(audio.currentTime)) {
+      const ct = audio.currentTime
+      // Use audio.duration when finite; fall back to trackDurationRef when stream
+      // is chunked (browser reports Infinity for duration with no Content-Length).
+      const dur = Number.isFinite(audio.duration) && audio.duration > 0
+        ? audio.duration
+        : trackDurationRef.current
+      setCurrentTime(ct)
+      if (dur > 0) {
+        setDuration(dur)
+        setProgress((ct / dur) * 100)
+      }
     }
     rafRef.current = requestAnimationFrame(updateProgress)
   }, [])
@@ -153,18 +186,82 @@ export default function App() {
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null }
   }, [])
 
-  // ===== Load trending + home sections =====
+  // Sync trackDurationRef whenever the track changes
+  useEffect(() => {
+    const d = Number(currentTrack?.duration)
+    trackDurationRef.current = Number.isFinite(d) && d > 0 ? d : 0
+  }, [currentTrack])
+
+  // ===== Volume Control =====
+  const applyVolume = useCallback((v) => {
+    const clamped = Math.max(0, Math.min(1, v))
+    setVolume(clamped)
+    setIsMuted(clamped === 0)
+    if (clamped > 0) prevVolumeRef.current = clamped
+    if (audioRef.current) audioRef.current.volume = clamped
+    try { localStorage.setItem('mics_volume', String(clamped)) } catch {}
+  }, [])
+
+  const toggleMute = useCallback(() => {
+    if (isMuted || volume === 0) {
+      applyVolume(prevVolumeRef.current || 0.7)
+    } else {
+      prevVolumeRef.current = volume
+      applyVolume(0)
+    }
+  }, [isMuted, volume, applyVolume])
+
+  const seekVolumeToClientX = useCallback((clientX) => {
+    const bar = volumeBarRef.current
+    if (!bar) return
+    const bounds = bar.getBoundingClientRect()
+    const x = Math.max(0, Math.min(clientX - bounds.left, bounds.width))
+    applyVolume(x / bounds.width)
+  }, [applyVolume])
+
+  const handleVolumePointerDown = useCallback((e) => {
+    isVolumeScrubbingRef.current = true
+    e.currentTarget.setPointerCapture(e.pointerId)
+    seekVolumeToClientX(e.clientX)
+  }, [seekVolumeToClientX])
+
+  const handleVolumePointerMove = useCallback((e) => {
+    if (!isVolumeScrubbingRef.current) return
+    seekVolumeToClientX(e.clientX)
+  }, [seekVolumeToClientX])
+
+  const handleVolumePointerUp = useCallback(() => {
+    isVolumeScrubbingRef.current = false
+  }, [])
+
+  // ===== Load trending =====
   useEffect(() => {
     fetch(`${API}/trending`)
       .then(r => r.json())
       .then(t => { if (t.length) setTrending(t) })
       .catch(() => {})
-    
-    fetch(`${API}/home`)
-      .then(r => r.json())
-      .then(sections => { if (sections.length) setHomeSections(sections) })
-      .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    const targetCover = currentTrack?.thumbnail || trending[0]?.thumbnail
+    if (!targetCover) return
+    let cancelled = false
+
+    extractCoverColor(targetCover).then((rgb) => {
+      if (!cancelled) setAmbientRgb(rgb)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [currentTrack?.thumbnail, trending])
+
+  // Apply ambient intensity to CSS variable and persist
+  useEffect(() => {
+    const v = String(ambientIntensity)
+    try { localStorage.setItem('mics_ambient_intensity', v) } catch {}
+    document.documentElement.style.setProperty('--ambient-alpha', v)
+  }, [ambientIntensity])
 
   // ===== Persist =====
   useEffect(() => {
@@ -176,61 +273,11 @@ export default function App() {
     localStorage.setItem('mics_recent', JSON.stringify(recentlyPlayed))
   }, [recentlyPlayed])
 
-  // Reset the increment tracker when track changes
-  useEffect(() => {
-    lastAddedTrackIdRef.current = null
-  }, [currentTrack?.id])
-
-  // ===== Highly Played Tracks (Jump back in) =====
-  useEffect(() => {
-    if (currentTrack && currentTime > 30 && lastAddedTrackIdRef.current !== currentTrack.id) {
-      lastAddedTrackIdRef.current = currentTrack.id // Mark as counted for this play session
-      
-      setRecentlyPlayed(prev => {
-        let exists = false
-        const updated = prev.map(t => {
-          if (t.id === currentTrack.id) {
-            exists = true
-            return { ...t, playCount: (t.playCount || 1) + 1, lastPlayed: Date.now() }
-          }
-          return t
-        })
-        
-        if (!exists) {
-          updated.push({ ...currentTrack, playCount: 1, lastPlayed: Date.now() })
-        }
-        
-        // Sort by play count (highly played), then by most recent tie-breaker
-        updated.sort((a, b) => {
-          const countB = b.playCount || 1
-          const countA = a.playCount || 1
-          if (countB !== countA) return countB - countA
-          return (b.lastPlayed || 0) - (a.lastPlayed || 0)
-        })
-        
-        return updated.slice(0, 30)
-      })
-    }
-  }, [currentTrack, currentTime])
-
   // ===== Search =====
   const handleSearch = useCallback((q) => {
     setSearch(q)
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
-    if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current)
-    if (!q.trim()) { setSearchResults([]); setSearching(false); setSuggestions([]); setShowSuggestions(false); return }
-    
-    // Fetch suggestions fast (150ms debounce)
-    suggestTimerRef.current = setTimeout(async () => {
-      try {
-        const r = await fetch(`${API}/search/suggestions?q=${encodeURIComponent(q)}`)
-        const data = await r.json()
-        setSuggestions(data)
-        setShowSuggestions(true)
-      } catch { setSuggestions([]) }
-    }, 150)
-    
-    // Full search (400ms debounce)
+    if (!q.trim()) { setSearchResults([]); setSearching(false); return }
     setSearching(true)
     setActiveNav('search')
     searchTimerRef.current = setTimeout(async () => {
@@ -240,20 +287,7 @@ export default function App() {
         setSearchResults(data)
       } catch { setSearchResults([]) }
       setSearching(false)
-    }, 400)
-  }, [])
-
-  const submitSearch = useCallback((q) => {
-    setSearch(q)
-    setShowSuggestions(false)
-    setSuggestions([])
-    setSearching(true)
-    setActiveNav('search')
-    fetch(`${API}/search?q=${encodeURIComponent(q)}`)
-      .then(r => r.json())
-      .then(data => setSearchResults(data))
-      .catch(() => setSearchResults([]))
-      .finally(() => setSearching(false))
+    }, 500)
   }, [])
 
   // ===== Play Track =====
@@ -270,6 +304,11 @@ export default function App() {
     audio.src = `${API}/stream/${track.id}`
     audio.load()
     audio.play().catch((err) => console.error('Audio play error:', err))
+
+    setRecentlyPlayed(prev => {
+      const filtered = prev.filter(t => t.id !== track.id)
+      return [track, ...filtered].slice(0, 30)
+    })
 
     if (!fromQueue) {
       fetch(`${API}/suggestions/${track.id}`)
@@ -338,17 +377,6 @@ export default function App() {
     setCurrentTime(audio.currentTime)
   }, [duration])
 
-  const handleVolume = useCallback((e) => {
-    const bounds = e.currentTarget.getBoundingClientRect()
-    const x = Math.max(0, Math.min(e.clientX - bounds.left, bounds.width))
-    const pct = x / bounds.width
-    setVolume(pct)
-  }, [])
-
-  const toggleMute = useCallback(() => {
-    setVolume(v => v > 0 ? 0 : 1)
-  }, [])
-
   const toggleLike = useCallback((e, track) => {
     e.stopPropagation()
     const newLiked = new Set(liked)
@@ -368,7 +396,7 @@ export default function App() {
   const renderTrackCard = (track) => (
     <div 
       key={`card-${track.id}`}
-      className="bg-zinc-900 p-md rounded-lg hover:bg-zinc-800 transition-colors cursor-pointer group relative"
+      className="bg-white/5 backdrop-blur-xl p-md rounded-2xl border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all cursor-pointer group relative shadow-[0_14px_40px_rgba(0,0,0,0.25)]"
       onClick={() => playTrack(track)}
     >
       <div className="aspect-square w-full mb-md overflow-hidden rounded-md relative shadow-lg">
@@ -389,7 +417,7 @@ export default function App() {
   const renderTrackListItem = (track, onPlay) => (
     <div 
       key={`list-${track.id}`}
-      className="flex items-center gap-md p-sm rounded-lg hover:bg-zinc-800/50 cursor-pointer group transition-colors"
+      className="flex items-center gap-md p-sm rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 hover:border-white/20 cursor-pointer group transition-all"
       onClick={() => onPlay ? onPlay(track) : playTrack(track)}
     >
       <div className="w-12 h-12 relative flex-shrink-0">
@@ -412,9 +440,21 @@ export default function App() {
   )
 
   return (
-    <div className="bg-background text-on-surface font-body-md antialiased min-h-screen flex">
+    <div
+      className="relative text-on-surface font-body-md antialiased min-h-screen flex overflow-hidden"
+      style={{
+        backgroundColor: '#070a10',
+        '--ambient-rgb': ambientRgb.join(', ')
+      }}
+    >
+      <div className="ambient-shell" aria-hidden="true">
+        <div className="ambient-blob ambient-blob-a"></div>
+        <div className="ambient-blob ambient-blob-b"></div>
+        <div className="ambient-noise"></div>
+      </div>
+
       {/* SideNavBar (WEB) */}
-      <nav className="hidden md:flex bg-zinc-900 font-inter text-sm font-medium fixed left-0 top-0 h-full w-64 border-r border-zinc-800 flex-col p-6 gap-y-2 z-40">
+      <nav className="hidden md:flex bg-slate-950/55 backdrop-blur-2xl font-inter text-sm font-medium fixed left-0 top-0 h-full w-64 border-r border-white/10 flex-col p-6 gap-y-2 z-40">
         <div className="flex items-center gap-2 mb-8">
           <img src="/logo.svg" alt="Mics Logo" className="w-8 h-8" />
           <div className="text-2xl font-black tracking-tighter text-white">Mics</div>
@@ -444,50 +484,34 @@ export default function App() {
       </nav>
 
       {/* Main Content Area */}
-      <main className="flex-1 ml-0 md:ml-64 mb-24 flex flex-col h-screen overflow-y-auto no-scrollbar pb-10">
+      <main className="flex-1 ml-0 md:ml-64 mb-24 flex flex-col h-screen overflow-y-auto no-scrollbar pb-10 relative z-10">
         {/* TopAppBar */}
-        <header className="bg-zinc-950/90 backdrop-blur-md font-inter text-sm font-semibold sticky top-0 z-30 w-full flex justify-between items-center px-6 py-4">
+        <header className="bg-slate-950/45 backdrop-blur-2xl font-inter text-sm font-semibold sticky top-0 z-30 w-full flex justify-between items-center px-6 py-4 border-b border-white/10">
           <div className="flex items-center gap-md w-full max-w-md">
             <div className="relative w-full">
-              <Icon name="search" className="absolute left-md top-1/2 -translate-y-1/2 text-zinc-400 z-10" />
+              <Icon name="search" className="absolute left-md top-1/2 -translate-y-1/2 text-zinc-400" />
               <input 
-                ref={searchInputRef}
                 value={search}
                 onChange={(e) => handleSearch(e.target.value)}
-                onFocus={() => { if (suggestions.length > 0) setShowSuggestions(true) }}
-                onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
-                onKeyDown={(e) => { if (e.key === 'Enter') { submitSearch(search); e.target.blur() } }}
-                className="w-full bg-[#282828] text-white rounded-full py-sm pl-12 pr-10 border-none focus:ring-2 focus:ring-primary/50 text-body-md h-10 outline-none transition-all" 
-                placeholder="Search songs, artists, albums..." 
+                className="w-full bg-[#282828] text-white rounded-full py-sm pl-12 pr-md border-none focus:ring-2 focus:ring-primary-container text-body-md h-10 outline-none" 
+                placeholder="What do you want to listen to?" 
                 type="text"
               />
-              {search && (
-                <button 
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white transition-colors z-10"
-                  onClick={() => { setSearch(''); setSearchResults([]); setSuggestions([]); setShowSuggestions(false); searchInputRef.current?.focus() }}
-                >
-                  <Icon name="close" className="text-lg" />
-                </button>
-              )}
-              
-              {/* Search Suggestions Dropdown */}
-              {showSuggestions && suggestions.length > 0 && (
-                <div className="absolute top-full left-0 right-0 mt-2 bg-[#282828] rounded-xl shadow-2xl border border-zinc-700/50 overflow-hidden z-50 backdrop-blur-xl">
-                  {suggestions.map((s, i) => (
-                    <button
-                      key={i}
-                      className="flex items-center gap-3 w-full px-4 py-3 text-left hover:bg-zinc-700/50 transition-colors text-sm text-zinc-200 hover:text-white"
-                      onMouseDown={(e) => { e.preventDefault(); submitSearch(s) }}
-                    >
-                      <Icon name="search" className="text-zinc-500 text-base" />
-                      <span>{s}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
             </div>
           </div>
           <div className="hidden md:flex items-center gap-lg">
+            <div className="flex items-center gap-2 bg-white/5 backdrop-blur-md rounded-full px-2 py-1 border border-white/6">
+              <button onClick={() => setAmbientIntensity(0.14)} title="Soft" className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${ambientIntensity <= 0.14 ? 'bg-white text-black' : 'text-white/80'}`}>
+                S
+              </button>
+              <button onClick={() => setAmbientIntensity(0.27)} title="Medium" className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${Math.abs(ambientIntensity - 0.27) < 0.01 ? 'bg-white text-black' : 'text-white/80'}`}>
+                M
+              </button>
+              <button onClick={() => setAmbientIntensity(0.45)} title="Vibrant" className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${ambientIntensity >= 0.45 ? 'bg-white text-black' : 'text-white/80'}`}>
+                V
+              </button>
+            </div>
+
             <button className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 flex items-center justify-center">
               <Icon name="person" className="text-zinc-400" />
             </button>
@@ -499,11 +523,11 @@ export default function App() {
           {/* HOME VIEW */}
           {activeNav === 'home' && (
             <>
-              {recentlyPlayed.filter(t => (t.playCount || 0) > 1).length > 0 && (
+              {recentlyPlayed.length > 0 && (
                 <section className="mb-12">
                   <h2 className="font-headline-md text-2xl font-bold text-white mb-6">Jump back in</h2>
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                    {recentlyPlayed.filter(t => (t.playCount || 0) > 1).slice(0, 5).map(track => renderTrackCard(track))}
+                    {recentlyPlayed.slice(0, 5).map(track => renderTrackCard(track))}
                   </div>
                 </section>
               )}
@@ -599,40 +623,6 @@ export default function App() {
                   </div>
                 )}
               </section>
-
-              {/* YouTube Music Home Sections */}
-              {homeSections.map((section, si) => (
-                <section key={`section-${si}`} className="mb-12">
-                  <h2 className="font-headline-md text-2xl font-bold text-white mb-6">{section.title}</h2>
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                    {section.contents.filter(item => item.id && item.type === 'SONG').slice(0, 5).map(item => renderTrackCard(item))}
-                  </div>
-                  {/* Show playlist items as cards too */}
-                  {section.contents.filter(item => item.type === 'PLAYLIST').length > 0 && section.contents.filter(item => item.type === 'SONG').length === 0 && (
-                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                      {section.contents.filter(item => item.type === 'PLAYLIST').slice(0, 5).map((item, pi) => (
-                        <div 
-                          key={`playlist-${si}-${pi}`}
-                          className="bg-zinc-900 p-md rounded-lg hover:bg-zinc-800 transition-colors cursor-pointer group relative"
-                          onClick={() => submitSearch(item.title)}
-                        >
-                          <div className="aspect-square w-full mb-md overflow-hidden rounded-md relative shadow-lg">
-                            {item.thumbnail ? (
-                              <img src={item.thumbnail} alt={item.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
-                            ) : (
-                              <div className="w-full h-full bg-gradient-to-br from-primary/30 to-emerald-900 flex items-center justify-center">
-                                <Icon name="queue_music" className="text-5xl text-white/40" />
-                              </div>
-                            )}
-                          </div>
-                          <h3 className="font-headline-md text-sm text-white truncate mb-1">{item.title}</h3>
-                          <p className="font-body-md text-xs text-zinc-400 truncate">{item.artist}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              ))}
             </>
           )}
 
@@ -690,78 +680,80 @@ export default function App() {
       </main>
 
       {/* Bottom Player (WEB & MOBILE) */}
-      <nav className="bg-zinc-950 text-white font-inter text-xs fixed bottom-0 w-full z-50 border-t border-zinc-800">
+      <nav className="bg-slate-950/48 backdrop-blur-2xl text-white font-inter text-xs fixed bottom-0 w-full h-24 z-50 border-t border-white/10 flex justify-between items-center px-4 md:px-6">
         
-        <div className="flex items-center justify-between h-[72px] px-4 md:px-6">
-          {/* Now Playing Info */}
-          <div className="flex items-center gap-3 w-[30%] min-w-0">
-            {currentTrack ? (
-              <>
-                <img src={currentTrack.thumbnail} alt="Album Art" className="w-12 h-12 rounded-md object-cover hidden sm:block shadow-md flex-shrink-0" />
-                <div className="flex flex-col min-w-0 justify-center">
-                  <span className="font-semibold text-sm text-white truncate leading-tight">{currentTrack.title}</span>
-                  <span className="text-xs text-zinc-400 truncate leading-tight mt-0.5">{currentTrack.artist}</span>
-                </div>
-                <button onClick={(e) => toggleLike(e, currentTrack)} className="text-zinc-400 hover:text-white flex-shrink-0 hidden sm:block">
-                  <Icon name="favorite" className={liked.has(currentTrack.id) ? "text-primary text-xl" : "text-xl"} />
-                </button>
-              </>
-            ) : (
-              <div className="text-zinc-500 text-sm hidden sm:block">No track playing</div>
-            )}
-          </div>
-
-          {/* Controls & Scrubber */}
-          <div className="flex flex-col items-center justify-center w-full max-w-[480px] md:w-[40%] px-2">
-            <div className="flex items-center gap-5 mb-1">
-              <button onClick={() => setShuffle(!shuffle)} className={`hidden sm:block hover:scale-110 transition-transform ${shuffle ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
-                <Icon name="shuffle" className="text-xl" />
-              </button>
-              <button onClick={playPrev} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
-                <Icon name="skip_previous" className="text-2xl" />
-              </button>
-              <button onClick={togglePlay} className="text-black hover:scale-105 transition-transform bg-white rounded-full flex items-center justify-center w-9 h-9 shadow-lg">
-                {isLoading ? (
-                  <div className="w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin"></div>
-                ) : (
-                  <Icon name={isPlaying ? "pause" : "play_arrow"} className="text-xl" />
-                )}
-              </button>
-              <button onClick={playNext} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
-                <Icon name="skip_next" className="text-2xl" />
-              </button>
-              <button onClick={() => setRepeat((repeat + 1) % 3)} className={`hidden sm:block hover:scale-110 transition-transform ${repeat > 0 ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
-                <Icon name={repeat === 2 ? "repeat_one" : "repeat"} className="text-xl" />
-              </button>
-            </div>
-            
-            <div className="w-full flex items-center gap-2">
-              <span className="text-[11px] text-zinc-400 w-9 text-right tabular-nums">{formatTime(currentTime)}</span>
-              <div className="flex-1 h-4 flex items-center cursor-pointer group" onClick={handleSeek}>
-                <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden relative pointer-events-none group-hover:h-1.5 transition-all">
-                  <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full" style={{ width: `${progress}%` }}></div>
-                </div>
+        {/* Now Playing Info */}
+        <div className="flex items-center gap-md w-1/3 min-w-0 rounded-2xl border border-white/10 bg-white/10 backdrop-blur-xl px-2 py-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.28)]">
+          {currentTrack ? (
+            <>
+              <img src={currentTrack.thumbnail} alt="Album Art" className="w-14 h-14 rounded-md object-cover hidden sm:block shadow-md" />
+              <div className="flex flex-col truncate px-2">
+                <span className="font-semibold text-sm text-white truncate">{currentTrack.title}</span>
+                <span className="text-xs text-zinc-400 truncate mt-0.5">{currentTrack.artist}</span>
               </div>
-              <span className="text-[11px] text-zinc-400 w-9 tabular-nums">{formatTime(duration)}</span>
-            </div>
-          </div>
-
-          {/* Volume & Extras (Desktop) */}
-          <div className="hidden md:flex items-center justify-end gap-3 w-[30%] text-zinc-400">
-            <button onClick={() => setShowOptions(true)} className="hover:text-white hover:scale-110 transition-transform">
-              <Icon name="settings" className="text-[20px]" />
-            </button>
-            <button onClick={() => setActiveNav('queue')} className={`hover:text-white hover:scale-110 transition-transform ${activeNav === 'queue' ? 'text-primary' : ''}`}>
-              <Icon name="queue_music" className="text-[20px]" />
-            </button>
-            <div className="flex items-center gap-2 w-28">
-              <button onClick={toggleMute} className="hover:text-white transition-colors flex items-center flex-shrink-0">
-                <Icon name={volume === 0 ? "volume_off" : volume < 0.5 ? "volume_down" : "volume_up"} className="text-[18px]" />
+              <button onClick={(e) => toggleLike(e, currentTrack)} className="text-zinc-400 hover:text-white ml-2 hidden sm:block">
+                <Icon name="favorite" className={liked.has(currentTrack.id) ? "text-primary" : ""} />
               </button>
-              <div className="flex-1 h-4 flex items-center cursor-pointer group" onClick={handleVolume}>
-                <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden relative pointer-events-none group-hover:h-1.5 transition-all">
-                  <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full" style={{ width: `${volume * 100}%` }}></div>
-                </div>
+            </>
+          ) : (
+            <div className="text-zinc-500 text-sm hidden sm:block">No track playing</div>
+          )}
+        </div>
+
+        {/* Controls & Scrubber */}
+        <div className="flex flex-col items-center justify-center w-full max-w-md md:w-1/3">
+          <div className="flex items-center gap-4 md:gap-6 mb-2">
+            <button onClick={() => setShuffle(!shuffle)} className={`hidden sm:block hover:scale-110 transition-transform ${shuffle ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
+              <Icon name="shuffle" />
+            </button>
+            <button onClick={playPrev} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
+              <Icon name="skip_previous" />
+            </button>
+            <button onClick={togglePlay} className="text-black hover:scale-105 transition-transform bg-white rounded-full flex items-center justify-center p-2 w-10 h-10 shadow-lg">
+              {isLoading ? (
+                <div className="w-5 h-5 border-2 border-black border-t-transparent rounded-full animate-spin"></div>
+              ) : (
+                <Icon name={isPlaying ? "pause" : "play_arrow"} />
+              )}
+            </button>
+            <button onClick={playNext} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
+              <Icon name="skip_next" />
+            </button>
+            <button onClick={() => setRepeat((repeat + 1) % 3)} className={`hidden sm:block hover:scale-110 transition-transform ${repeat > 0 ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
+              <Icon name={repeat === 2 ? "repeat_one" : "repeat"} />
+            </button>
+          </div>
+          
+          <div className="w-full flex items-center gap-3">
+            <span className="text-[11px] text-zinc-400 w-8 text-right">{formatTime(currentTime)}</span>
+            <div className="h-1.5 flex-1 bg-zinc-800 rounded-full overflow-hidden group cursor-pointer relative" onClick={handleSeek}>
+              <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full relative" style={{ width: `${progress}%` }}></div>
+            </div>
+            <span className="text-[11px] text-zinc-400 w-8">{formatTime(duration)}</span>
+          </div>
+        </div>
+
+        {/* Volume & Extras (Desktop) */}
+        <div className="flex items-center justify-end gap-4 w-1/3 hidden md:flex text-zinc-400">
+          <button onClick={() => setActiveNav('queue')} className={`hover:text-white hover:scale-110 transition-transform ${activeNav === 'queue' ? 'text-primary' : ''}`}>
+            <Icon name="queue_music" className="text-[20px]" />
+          </button>
+          <div className="flex items-center gap-2 w-28 group/vol">
+            <button onClick={toggleMute} className="hover:text-white transition-colors flex-shrink-0">
+              <Icon name={volume === 0 || isMuted ? 'volume_off' : volume < 0.5 ? 'volume_down' : 'volume_up'} className="text-[18px]" />
+            </button>
+            <div
+              ref={volumeBarRef}
+              className="h-1.5 flex-1 bg-zinc-700 rounded-full cursor-pointer relative group-hover/vol:h-2 transition-all"
+              onPointerDown={handleVolumePointerDown}
+              onPointerMove={handleVolumePointerMove}
+              onPointerUp={handleVolumePointerUp}
+            >
+              <div
+                className="h-full bg-white group-hover/vol:bg-primary transition-colors rounded-full relative"
+                style={{ width: `${(isMuted ? 0 : volume) * 100}%` }}
+              >
+                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full opacity-0 group-hover/vol:opacity-100 transition-opacity shadow" />
               </div>
             </div>
           </div>
@@ -770,7 +762,7 @@ export default function App() {
       </nav>
       
       {/* Mobile Bottom Nav (replaces sidebar on small screens) */}
-      <nav className="md:hidden bg-zinc-900/95 backdrop-blur-md text-white fixed bottom-[72px] w-full h-14 z-40 border-t border-zinc-800 flex justify-around items-center px-2">
+      <nav className="md:hidden bg-slate-950/58 backdrop-blur-2xl text-white fixed bottom-24 w-full h-16 z-40 border-t border-white/10 flex justify-around items-center px-2">
         <button onClick={() => setActiveNav('home')} className={`flex flex-col items-center p-2 ${activeNav === 'home' ? 'text-white' : 'text-zinc-500'}`}>
           <Icon name="home" />
         </button>
@@ -785,112 +777,6 @@ export default function App() {
         </button>
       </nav>
       
-      {/* Player Options Modal */}
-      {showOptions && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowOptions(false)}>
-          <div className="bg-[#121212] w-full max-w-md rounded-[20px] shadow-2xl border border-neutral-800/50 overflow-hidden" onClick={e => e.stopPropagation()}>
-            <div className="p-6 border-b border-neutral-800/50 flex justify-between items-center">
-              <h2 className="font-headline-md text-white font-bold text-lg">Player Options</h2>
-              <button onClick={() => setShowOptions(false)} className="hover:text-white transition-colors text-neutral-400">
-                <Icon name="close" />
-              </button>
-            </div>
-            
-            <div className="max-h-[70vh] overflow-y-auto no-scrollbar pb-6">
-              {currentTrack && (
-                <div className="p-6 flex items-center gap-4 bg-[#1a1a1a]">
-                  <img src={currentTrack.thumbnail} className="w-16 h-16 rounded-lg object-cover shadow-md" alt="Thumbnail" />
-                  <div className="min-w-0 flex-1">
-                    <h3 className="font-bold text-white truncate">{currentTrack.title}</h3>
-                    <p className="text-sm text-neutral-400 truncate">{currentTrack.artist}</p>
-                  </div>
-                </div>
-              )}
-              
-              <div className="p-6 space-y-4">
-                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Sleep Timer</h4>
-                <div className="space-y-2">
-                  {['5 minutes', '10 minutes', '30 minutes', '60 minutes', 'End of Track'].map(t => (
-                    <div 
-                      key={t} 
-                      onClick={() => handleSleepTimer(t)}
-                      className={`flex justify-between items-center py-2 text-sm cursor-pointer transition-colors ${sleepTimer === t ? 'text-primary font-bold' : 'text-neutral-300 hover:text-white'}`}
-                    >
-                      <span>{t}</span>
-                      {sleepTimer === t && <Icon name="check" className="text-sm" />}
-                    </div>
-                  ))}
-                </div>
-              </div>
-              
-              <div className="h-px bg-neutral-800 mx-6"></div>
-              
-              <div className="p-6 space-y-4">
-                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Playback</h4>
-                <div className="space-y-6">
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-white">Crossfade</span>
-                    <div className="w-10 h-5 bg-zinc-800 rounded-full relative cursor-pointer">
-                      <div className="absolute left-1 top-1 w-3 h-3 bg-neutral-400 rounded-full"></div>
-                    </div>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-white">Gapless Playback</span>
-                    <div className="w-10 h-5 bg-primary rounded-full relative cursor-pointer">
-                      <div className="absolute right-1 top-1 w-3 h-3 bg-black rounded-full"></div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              <div className="h-px bg-neutral-800 mx-6"></div>
-              
-              <div className="p-6 space-y-4">
-                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Queue Management</h4>
-                <div className="grid grid-cols-1 gap-2">
-                  <button onClick={() => { setQueue([]); setShowOptions(false); }} className="flex items-center gap-3 w-full py-3 px-4 bg-[#282828] hover:bg-[#333333] transition-colors rounded-lg text-sm text-white font-medium">
-                    <Icon name="delete_sweep" className="text-lg" /> Clear current queue
-                  </button>
-                  <button className="flex items-center gap-3 w-full py-3 px-4 bg-[#282828] hover:bg-[#333333] transition-colors rounded-lg text-sm text-white font-medium">
-                    <Icon name="playlist_add" className="text-lg" /> Save queue as playlist
-                  </button>
-                  <button onClick={() => setShuffle(!shuffle)} className="flex items-center gap-3 w-full py-3 px-4 bg-[#282828] hover:bg-[#333333] transition-colors rounded-lg text-sm text-white font-medium">
-                    <Icon name="shuffle" className={`text-lg ${shuffle ? 'text-primary' : ''}`} /> Shuffle entire queue
-                  </button>
-                </div>
-              </div>
-              
-              <div className="h-px bg-neutral-800 mx-6"></div>
-              
-              <div className="p-6 space-y-4">
-                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Track Actions</h4>
-                <div className="space-y-1">
-                  <div className="flex items-center gap-4 py-2 text-sm text-neutral-300 hover:text-white cursor-pointer">
-                    <Icon name="add_circle" /> <span>Add to playlist</span>
-                  </div>
-                  <div className="flex items-center gap-4 py-2 text-sm text-neutral-300 hover:text-white cursor-pointer">
-                    <Icon name="person" /> <span>Go to artist</span>
-                  </div>
-                  <div className="flex items-center gap-4 py-2 text-sm text-neutral-300 hover:text-white cursor-pointer">
-                    <Icon name="share" /> <span>Share track</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="h-px bg-neutral-800 mx-6"></div>
-              
-              <div className="p-6 space-y-4">
-                <h4 className="text-[10px] font-bold text-neutral-500 uppercase tracking-[0.15em]">Audio Quality</h4>
-                <div className="flex gap-2">
-                  <button className="flex-1 py-2 text-[11px] font-bold uppercase tracking-widest border border-neutral-700 rounded-full text-neutral-400 hover:text-white hover:border-neutral-500 transition-all">Low</button>
-                  <button className="flex-1 py-2 text-[11px] font-bold uppercase tracking-widest border border-neutral-700 rounded-full text-neutral-400 hover:text-white hover:border-neutral-500 transition-all">Normal</button>
-                  <button className="flex-1 py-2 text-[11px] font-bold uppercase tracking-widest bg-primary text-black border border-primary rounded-full shadow-[0_0_15px_rgba(29,185,84,0.3)]">High</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

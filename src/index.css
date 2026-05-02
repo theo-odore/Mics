@@ -1,11 +1,90 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+:root {
+  --ambient-rgb: 29, 185, 84;
+  --ambient-alpha: 0.27;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.ambient-shell {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(1150px 800px at 12% 0%, rgba(var(--ambient-rgb), var(--ambient-alpha)), transparent 62%),
+    radial-gradient(880px 700px at 100% 10%, rgba(var(--ambient-rgb), calc(var(--ambient-alpha) * 0.75)), transparent 58%),
+    linear-gradient(160deg, #05070c 0%, #080d15 50%, #0d111b 100%);
+  transition: background 750ms ease;
+}
+
+.ambient-blob {
+  position: absolute;
+  filter: blur(70px);
+  border-radius: 999px;
+  background: rgba(var(--ambient-rgb), var(--ambient-alpha));
+  transition: background 650ms ease;
+}
+
+.ambient-blob-a {
+  width: min(45vw, 540px);
+  height: min(45vw, 540px);
+  top: -12%;
+  left: -8%;
+  animation: ambientFloatA 18s ease-in-out infinite;
+}
+
+.ambient-blob-b {
+  width: min(38vw, 480px);
+  height: min(38vw, 480px);
+  right: -9%;
+  bottom: -16%;
+  animation: ambientFloatB 22s ease-in-out infinite;
+}
+
+.ambient-noise {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.05) 0.4px, transparent 0.4px);
+  background-size: 2px 2px;
+  opacity: 0.08;
+  mix-blend-mode: soft-light;
+}
+
+@keyframes ambientFloatA {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(7%, 9%, 0) scale(1.08);
+  }
+}
+
+@keyframes ambientFloatB {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-10%, -8%, 0) scale(1.1);
+  }
+}
+
+@media (max-width: 768px) {
+  .ambient-blob-a,
+  .ambient-blob-b {
+    filter: blur(58px);
+  }
 }
