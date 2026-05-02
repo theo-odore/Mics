@@ -22,3 +22,13 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+#skills
+tools/
+awesome-claude-skills/
+git-team-push.skill
+git-team-push-extracted/
+awesome-design-md/
+designer-skills/
+ui-ux-pro-max-skill/
+.claude/
