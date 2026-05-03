@@ -1,5 +1,8 @@
 import express from 'express'
 import cors from 'cors'
+import rateLimit from 'express-rate-limit'
+import { createClient } from 'redis'
+import geoip from 'geoip-lite'
 import YTMusic from 'ytmusic-api'
 import youtubeSr from 'youtube-sr'
 import youtubedl from 'youtube-dl-exec'
@@ -11,10 +14,29 @@ puppeteer.use(StealthPlugin())
 
 const YouTube = youtubeSr.default || youtubeSr;
 const app = express()
+app.set('trust proxy', true)
 const PORT = 3001
 
 app.use(cors())
 app.use(express.json())
+
+// ===== Optional Redis client (if REDIS_URL provided) =====
+let redisClient = null
+const REDIS_URL = process.env.REDIS_URL || null
+if (REDIS_URL) {
+  redisClient = createClient({ url: REDIS_URL })
+  redisClient.on('error', (e) => console.error('Redis error:', e.message))
+  redisClient.connect().then(() => console.log('Connected to Redis')).catch(() => { redisClient = null })
+}
+
+// ===== Rate limiter: small in-memory fallback if redis not available =====
+const limiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 60, // limit each IP to 60 requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+app.use(limiter)
 
 // ===== YouTube Music API (Primary Search Engine) =====
 let ytmusic = null
@@ -253,28 +275,186 @@ app.get('/api/home', async (req, res) => {
 // ===== Trending (curated from YouTube Music) =====
 app.get('/api/trending', async (req, res) => {
   try {
-    // Try YouTube Music search for trending songs
-    if (await ensureYTMusic()) {
+    const scope = (req.query.scope || 'global')
+    const country = (req.query.country || 'US').toUpperCase()
+
+    const cacheKey = `${scope}:${country}`
+    // Try Redis cache first
+    if (redisClient) {
       try {
-        const songs = await ytmusic.searchSongs('trending songs 2025')
-        if (songs && songs.length > 0) {
-          console.log(`[Trending] YTMusic: ${songs.length} songs`)
-          return res.json(songs.map(mapYTMusicTrack))
+        const cachedRaw = await redisClient.get(cacheKey)
+        if (cachedRaw) {
+          const parsed = JSON.parse(cachedRaw)
+          return res.json(parsed)
         }
-      } catch (err) {
-        console.warn('[Trending] YTMusic failed:', err.message?.slice(0, 80))
+      } catch (err) { console.warn('Redis get failed:', err.message) }
+    } else {
+      // fallback in-memory cache
+      if (!global.trendingCache) global.trendingCache = new Map()
+      const cached = global.trendingCache.get(cacheKey)
+      if (cached && (Date.now() - cached.ts) < (10 * 60 * 1000)) { // 10 minutes
+        return res.json(cached.data)
       }
     }
 
-    // Fallback: youtube-sr
-    const results = await YouTube.search('trending music 2025', { limit: 20, type: 'video' })
-    const filtered = results.filter(v => (v.duration || 0) / 1000 < 600)
-    res.json((filtered.length > 0 ? filtered : results).map(mapYouTubeSrTrack))
+    // If national scope requested, try iTunes RSS charts first (no API key required)
+    if (scope === 'national' && country) {
+      try {
+        const itunes = await fetchItunesTopSongs(country, 25)
+        // also fetch youtube-sr results to merge
+        let ytList = []
+        try {
+          const results = await YouTube.search(`top music ${country} 2025`, { limit: 25, type: 'video' })
+          ytList = (results || []).filter(v => (v.duration || 0) / 1000 < 600).map(mapYouTubeSrTrack)
+        } catch (e) {
+          console.warn('[Trending] youtube-sr fetch failed for merge:', e.message?.slice(0,80))
+        }
+
+        if ((itunes && itunes.length > 0) || (ytList && ytList.length > 0)) {
+          const merged = mergeTrendingSources(itunes || [], ytList || [], { itunes: 0.6, youtube: 0.4 }, 25)
+          // cache
+          if (redisClient) {
+            try { await redisClient.set(cacheKey, JSON.stringify(merged), { EX: 10 * 60 }) } catch (e) { console.warn('Redis set failed:', e.message) }
+          } else {
+            global.trendingCache.set(cacheKey, { ts: Date.now(), data: merged })
+          }
+          console.log(`[Trending] Merged (${country}): ${merged.length} tracks`) 
+          return res.json(merged)
+        }
+      } catch (err) {
+        console.warn('[Trending] iTunes fetch failed:', err.message?.slice(0,80))
+      }
+    }
+
+    // fall through to previous logic for global or fallback
+    try {
+      // Try YouTube Music search for trending songs
+      if (await ensureYTMusic()) {
+        try {
+          const songs = await ytmusic.searchSongs('trending songs 2025')
+          if (songs && songs.length > 0) {
+            console.log(`[Trending] YTMusic: ${songs.length} songs`)
+            const mapped = songs.map(mapYTMusicTrack)
+            global.trendingCache.set(cacheKey, { ts: Date.now(), data: mapped })
+            return res.json(mapped)
+          }
+        } catch (err) {
+          console.warn('[Trending] YTMusic failed:', err.message?.slice(0, 80))
+        }
+      }
+
+      // Fallback: youtube-sr
+      const results = await YouTube.search('trending music 2025', { limit: 20, type: 'video' })
+      const filtered = results.filter(v => (v.duration || 0) / 1000 < 600)
+      const out = (filtered.length > 0 ? filtered : results).map(mapYouTubeSrTrack)
+      global.trendingCache.set(cacheKey, { ts: Date.now(), data: out })
+      res.json(out)
+    } catch (err) {
+      console.error('Trending error:', err.message)
+      res.json([])
+    }
   } catch (err) {
-    console.error('Trending error:', err.message)
+    console.error('Trending outer error:', err.message)
     res.json([])
   }
 })
+
+// ===== Geolocation endpoint (country-level) =====
+app.get('/api/geolocate', async (req, res) => {
+  try {
+    const forwarded = req.headers['x-forwarded-for'] || ''
+    const ip = (forwarded.split(',')[0] || req.ip || '').trim()
+    let country = 'US'
+    if (ip) {
+      try {
+        const geo = geoip.lookup(ip)
+        if (geo && geo.country) country = geo.country
+      } catch (e) {
+        console.warn('geoip lookup failed:', e.message)
+      }
+    }
+    res.json({ country })
+  } catch (err) {
+    res.json({ country: 'US' })
+  }
+})
+
+// ===== iTunes RSS / Apple Music charts fetcher (no API key required) =====
+async function fetchItunesTopSongs(country = 'US', limit = 25) {
+  const c = (country || 'US').toLowerCase()
+  // try the legacy iTunes RSS endpoint
+  const url = `https://itunes.apple.com/${c}/rss/topsongs/limit=${limit}/json`
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'Node.js' } }, (r) => {
+      let raw = ''
+      r.on('data', (chunk) => raw += chunk)
+      r.on('end', () => {
+        try {
+          const json = JSON.parse(raw)
+          const entries = (json.feed && json.feed.entry) || []
+          const mapped = entries.map((e, idx) => {
+            const id = e.id && (e.id.attributes && e.id.attributes.href) ? (e.id.attributes.href.split('/id').pop() || `${country}-song-${idx}`) : `${country}-song-${idx}`
+            const title = e['im:name']?.label || ''
+            const artist = e['im:artist']?.label || ''
+            const images = e['im:image'] || []
+            const thumb = images.length ? images[images.length - 1].label : ''
+            return {
+              id: id.toString(),
+              title,
+              artist,
+              thumbnail: proxyThumb(thumb),
+              duration: 0,
+              source: 'itunes'
+            }
+          })
+          resolve(mapped)
+        } catch (err) {
+          reject(err)
+        }
+      })
+    }).on('error', (e) => reject(e))
+  })
+}
+
+// ===== Merge multiple source lists into a ranked combined list =====
+function mergeTrendingSources(itunes = [], youtube = [], weights = { itunes: 0.6, youtube: 0.4 }, limit = 25) {
+  const scores = new Map()
+  const items = new Map()
+
+  const addList = (list, keyPrefix, weight) => {
+    list.forEach((it, idx) => {
+      const key = `${it.id}` || `${keyPrefix}-${idx}`
+      const rankScore = 1 / (idx + 1)
+      const score = rankScore * weight
+      scores.set(key, (scores.get(key) || 0) + score)
+      // keep the most complete metadata
+      if (!items.has(key)) items.set(key, { ...it })
+      else items.set(key, { ...items.get(key), ...it })
+    })
+  }
+
+  addList(itunes, 'itunes', weights.itunes)
+  addList(youtube, 'yt', weights.youtube)
+
+  // Convert to array, sort by combined score
+  const merged = Array.from(scores.entries())
+    .map(([key, score]) => ({ key, score, item: items.get(key) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(entry => {
+      const it = entry.item
+      return {
+        id: it.id,
+        title: it.title || it.name || '',
+        artist: it.artist || it['im:artist'] || it.channel || '',
+        thumbnail: it.thumbnail || it.image || it.thumb || '',
+        duration: it.duration || 0,
+        source: it.source || 'merged'
+      }
+    })
+
+  return merged
+}
 
 // ===== Song Info =====
 app.get('/api/info/:id', async (req, res) => {
@@ -444,8 +624,6 @@ app.get('/api/stream/:id', async (req, res) => {
 
 // ===== Boot =====
 async function boot() {
-  await initYTMusic()
-
   app.listen(PORT, () => {
     console.log(`\n  🎵 Mics Server running at http://localhost:${PORT}`)
     console.log(`  ├─ Search:      GET /api/search?q=song+name`)
@@ -455,6 +633,10 @@ async function boot() {
     console.log(`  ├─ Home Feed:   GET /api/home`)
     console.log(`  ├─ Info:        GET /api/info/:videoId`)
     console.log(`  └─ Trending:    GET /api/trending\n`)
+  })
+
+  initYTMusic().catch((err) => {
+    console.error('  ❌ Background YouTube Music init failed:', err.message)
   })
 }
 

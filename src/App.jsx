@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 
 const API = 'http://localhost:3001/api'
 
@@ -11,6 +12,12 @@ function formatTime(s) {
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v))
+}
+
+function getNowPlayingPanelWidth(title) {
+  const textLength = (title || '').trim().length
+  const estimatedWidth = 170 + textLength * 7.5
+  return clamp(Math.round(estimatedWidth), 220, 520)
 }
 
 function normalizeRgb([r, g, b]) {
@@ -100,6 +107,8 @@ export default function App() {
   const [searching, setSearching] = useState(false)
   
   const [trending, setTrending] = useState([])
+  const [trendingScope, setTrendingScope] = useState('global') // 'global' or 'national'
+  const [trendingCountry, setTrendingCountry] = useState(() => (navigator?.language?.toUpperCase?.()?.includes('IN') ? 'IN' : 'US'))
   const [recentlyPlayed, setRecentlyPlayed] = useState(() => {
     try { return JSON.parse(localStorage.getItem('mics_recent') || '[]') }
     catch { return [] }
@@ -111,6 +120,15 @@ export default function App() {
   })
   const [isMuted, setIsMuted] = useState(false)
   const prevVolumeRef = useRef(1)
+  const [isNowPlayingOpen, setIsNowPlayingOpen] = useState(false)
+  const footerRef = useRef(null)
+  const [modalImageLoaded, setModalImageLoaded] = useState(false)
+  const [modalImageError, setModalImageError] = useState(false)
+  const visualizerCanvasRef = useRef(null)
+  const audioCtxRef = useRef(null)
+  const analyserRef = useRef(null)
+  const mediaSourceRef = useRef(null)
+  const rafVisualizerRef = useRef(null)
 
   const audioRef = useRef(null)
   const rafRef = useRef(null)
@@ -128,6 +146,34 @@ export default function App() {
     // Restore persisted volume
     try { audio.volume = parseFloat(localStorage.getItem('mics_volume') || '1') } catch { audio.volume = 1 }
     audioRef.current = audio
+
+    // Setup AudioContext, MediaElementSource and Analyser once here to avoid multiple creations
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext
+      if (AC) {
+        const ctx = audioCtxRef.current || new AC()
+        audioCtxRef.current = ctx
+
+        // create media source if not already created
+        if (!mediaSourceRef.current) {
+          try {
+            mediaSourceRef.current = ctx.createMediaElementSource(audio)
+          } catch (err) {
+            mediaSourceRef.current = null
+          }
+        }
+
+        if (!analyserRef.current && mediaSourceRef.current) {
+          const analyser = ctx.createAnalyser()
+          analyser.fftSize = 256
+          mediaSourceRef.current.connect(analyser)
+          analyser.connect(ctx.destination)
+          analyserRef.current = analyser
+        }
+      }
+    } catch (err) {
+      // ignore audio context setup errors
+    }
 
     audio.addEventListener('loadedmetadata', () => setDuration(audio.duration))
     audio.addEventListener('playing', () => { setIsPlaying(true); setIsLoading(false); startRAF() })
@@ -234,12 +280,31 @@ export default function App() {
     isVolumeScrubbingRef.current = false
   }, [])
 
-  // ===== Load trending =====
+  // ===== Load trending (global or national) =====
   useEffect(() => {
-    fetch(`${API}/trending`)
+    const scope = trendingScope || 'global'
+    const countryParam = scope === 'national' ? `?country=${encodeURIComponent(trendingCountry)}` : ''
+    const url = `${API}/trending${countryParam}${scope === 'national' ? `&scope=national` : (countryParam ? '&scope=global' : '')}`
+    fetch(url)
       .then(r => r.json())
-      .then(t => { if (t.length) setTrending(t) })
+      .then(t => { if (t && t.length) setTrending(t) })
       .catch(() => {})
+  }, [trendingScope, trendingCountry])
+
+  // ===== Try server-side geolocation, fallback to navigator.language =====
+  useEffect(() => {
+    let mounted = true
+    fetch(`${API}/geolocate`).then(r => r.json()).then(j => {
+      if (!mounted) return
+      if (j && j.country) {
+        setTrendingCountry(j.country.toUpperCase())
+        // if the country is India, default to national trending
+        if (j.country.toUpperCase() === 'IN') setTrendingScope('national')
+      }
+    }).catch(() => {
+      // fallback already handled by initial state
+    })
+    return () => { mounted = false }
   }, [])
 
   useEffect(() => {
@@ -392,6 +457,243 @@ export default function App() {
     setLikedTracks(newTracks)
   }, [liked, likedTracks])
 
+  useEffect(() => {
+    const handleKeyboardShortcuts = (e) => {
+      const target = e.target
+      const isTypingTarget =
+        target instanceof HTMLElement &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+
+      if (isTypingTarget) return
+
+      const audio = audioRef.current
+      const key = e.key.toLowerCase()
+
+      // Don't handle shortcuts when modifier keys are pressed (allow browser defaults)
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+
+      if (key === ' ' || key === 'spacebar') {
+        if (!currentTrack) return
+        e.preventDefault()
+        togglePlay()
+        return
+      }
+
+      if (key === 'm') {
+        if (!currentTrack) return
+        e.preventDefault()
+        toggleMute()
+        return
+      }
+
+      if (key === 'arrowleft') {
+        if (!audio || !currentTrack) return
+        e.preventDefault()
+        audio.currentTime = Math.max(0, audio.currentTime - 5)
+        return
+      }
+
+      if (key === 'arrowright') {
+        if (!audio || !currentTrack) return
+        e.preventDefault()
+        const maxTime = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : trackDurationRef.current
+        audio.currentTime = Math.min(maxTime || audio.currentTime + 5, audio.currentTime + 5)
+        return
+      }
+
+      if (key === 'arrowup') {
+        if (!audio || !currentTrack) return
+        e.preventDefault()
+        applyVolume(volume + 0.05)
+        return
+      }
+
+      if (key === 'arrowdown') {
+        if (!audio || !currentTrack) return
+        e.preventDefault()
+        applyVolume(volume - 0.05)
+        return
+      }
+
+      if (key === 's') {
+        e.preventDefault()
+        setShuffle((value) => !value)
+        return
+      }
+
+      if (key === 'r') {
+        e.preventDefault()
+        setRepeat((value) => (value + 1) % 3)
+        return
+      }
+
+      if (key === 'l') {
+        if (!currentTrack) return
+        e.preventDefault()
+        toggleLike({ stopPropagation: () => {} }, currentTrack)
+        return
+      }
+
+      if (key === 'n') {
+        if (!currentTrack) return
+        e.preventDefault()
+        playNext()
+        return
+      }
+
+      if (key === 'p') {
+        if (!currentTrack) return
+        e.preventDefault()
+        playPrev()
+        return
+      }
+
+      if (key === '1') {
+        e.preventDefault()
+        setActiveNav('home')
+        return
+      }
+
+      if (key === '2') {
+        e.preventDefault()
+        setActiveNav('search')
+        return
+      }
+
+      if (key === '3') {
+        e.preventDefault()
+        setActiveNav('liked')
+        return
+      }
+
+      if (key === '4') {
+        e.preventDefault()
+        setActiveNav('queue')
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyboardShortcuts)
+    return () => window.removeEventListener('keydown', handleKeyboardShortcuts)
+  }, [applyVolume, currentTrack, playNext, playPrev, setActiveNav, toggleLike, toggleMute, togglePlay, volume])
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape' && isNowPlayingOpen) setIsNowPlayingOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isNowPlayingOpen])
+
+  // Preload modal image and start visualizer when modal opens
+  useEffect(() => {
+    if (!isNowPlayingOpen || !currentTrack) return
+
+    setModalImageLoaded(false)
+    setModalImageError(false)
+
+    // Preload thumbnail
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => setModalImageLoaded(true)
+    img.onerror = () => setModalImageError(true)
+    img.src = currentTrack.thumbnail || ''
+
+    // Setup visualizer
+    let localAudioCtx = audioCtxRef.current
+    try {
+      if (!localAudioCtx) {
+        localAudioCtx = new (window.AudioContext || window.webkitAudioContext)()
+        audioCtxRef.current = localAudioCtx
+      }
+    } catch (err) {
+      localAudioCtx = null
+    }
+
+    const audioEl = audioRef.current
+    if (localAudioCtx && audioEl) {
+      try {
+        // Ensure audio context is running (user gesture may be required)
+        if (localAudioCtx.state === 'suspended') {
+          localAudioCtx.resume().catch(() => {})
+        }
+        // Create media source + analyser once and reuse them to avoid DOMException
+        if (!mediaSourceRef.current) {
+          try {
+            mediaSourceRef.current = localAudioCtx.createMediaElementSource(audioEl)
+          } catch (err) {
+            // creating source may fail if already created elsewhere
+            mediaSourceRef.current = null
+          }
+        }
+
+        if (!analyserRef.current && mediaSourceRef.current) {
+          const analyser = localAudioCtx.createAnalyser()
+          analyser.fftSize = 256
+          mediaSourceRef.current.connect(analyser)
+          analyser.connect(localAudioCtx.destination)
+          analyserRef.current = analyser
+        }
+
+        const analyser = analyserRef.current
+        if (!analyser) return
+        const canvas = visualizerCanvasRef.current
+        const ctx = canvas?.getContext('2d')
+        const bufferLength = analyser.frequencyBinCount
+        const dataArray = new Uint8Array(bufferLength)
+
+        function draw() {
+          rafVisualizerRef.current = requestAnimationFrame(draw)
+          if (!ctx || !canvas) return
+          analyser.getByteFrequencyData(dataArray)
+          ctx.clearRect(0, 0, canvas.width, canvas.height)
+          const barWidth = (canvas.width / bufferLength) * 1.5
+          let x = 0
+          for (let i = 0; i < bufferLength; i++) {
+            const v = dataArray[i] / 255
+            const h = v * canvas.height
+            ctx.fillStyle = `rgba(${Math.round(200 * v)}, ${Math.round(220 * v)}, ${Math.round(255 * v)}, 0.9)`
+            ctx.fillRect(x, canvas.height - h, barWidth, h)
+            x += barWidth + 1
+          }
+        }
+
+        // Resize canvas to device pixels
+        function resizeCanvas() {
+          if (!visualizerCanvasRef.current || !ctx) return
+          const c = visualizerCanvasRef.current
+          const rect = c.getBoundingClientRect()
+          const dpr = Math.max(1, window.devicePixelRatio || 1)
+          c.width = Math.max(1, Math.floor(rect.width * dpr))
+          c.height = Math.max(1, Math.floor(rect.height * dpr))
+          c.style.width = rect.width + 'px'
+          c.style.height = rect.height + 'px'
+          ctx.setTransform(1, 0, 0, 1, 0, 0)
+          ctx.scale(dpr, dpr)
+        }
+
+        resizeCanvas()
+        window.addEventListener('resize', resizeCanvas)
+        draw()
+
+        return () => {
+          cancelAnimationFrame(rafVisualizerRef.current)
+          window.removeEventListener('resize', resizeCanvas)
+          try { analyser.disconnect() } catch {}
+          analyserRef.current = null
+        }
+      } catch (err) {
+        // ignore visualizer errors
+      }
+    }
+
+    return () => {
+      // no-op here; inner cleanup returned above
+    }
+  }, [isNowPlayingOpen, currentTrack])
+
   // Track Card Render Function
   const renderTrackCard = (track) => (
     <div 
@@ -536,9 +838,27 @@ export default function App() {
                 <div className="flex items-center justify-between mb-8">
                   <h2 className="font-headline-md text-3xl font-black tracking-tight text-white flex items-center gap-3">
                     <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-emerald-400 drop-shadow-sm">Trending</span>
-                    Global
+                    <span className="text-zinc-300 text-base">{trendingScope === 'global' ? 'Global' : `Top in ${trendingCountry}`}</span>
                     <Icon name="local_fire_department" className="text-primary text-3xl animate-pulse drop-shadow-[0_0_15px_rgba(83,224,118,0.5)]" />
                   </h2>
+
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setTrendingScope('global')} className={`px-3 py-1 rounded ${trendingScope === 'global' ? 'bg-white text-black' : 'bg-white/5 text-white/80 hover:bg-white/10'}`}>
+                      Global
+                    </button>
+                    <button onClick={() => { setTrendingScope('national'); }} className={`px-3 py-1 rounded ${trendingScope === 'national' ? 'bg-white text-black' : 'bg-white/5 text-white/80 hover:bg-white/10'}`}>
+                      National
+                    </button>
+                    {trendingScope === 'national' && (
+                      <select value={trendingCountry} onChange={(e) => setTrendingCountry(e.target.value)} className="ml-2 bg-[#2b2b2b] text-white px-2 py-1 rounded">
+                        <option value="IN">India</option>
+                        <option value="US">United States</option>
+                        <option value="GB">United Kingdom</option>
+                        <option value="CA">Canada</option>
+                        <option value="AU">Australia</option>
+                      </select>
+                    )}
+                  </div>
                 </div>
 
                 {trending.length > 0 && (
@@ -680,10 +1000,33 @@ export default function App() {
       </main>
 
       {/* Bottom Player (WEB & MOBILE) */}
-      <nav className="bg-slate-950/48 backdrop-blur-2xl text-white font-inter text-xs fixed bottom-0 w-full h-24 z-50 border-t border-white/10 flex justify-between items-center px-4 md:px-6">
+      <nav
+        ref={footerRef}
+        onClick={(e) => {
+          // Open modal when clicking empty space in the footer (not on controls)
+          const ignore = e.target instanceof HTMLElement && (
+            e.target.closest('.player-controls-center') ||
+            e.target.closest('.player-right') ||
+            e.target.closest('button, a, input, select, textarea')
+          )
+          if (ignore) return
+          if (!currentTrack) return
+          setIsNowPlayingOpen(true)
+        }}
+        className="bg-slate-950/48 backdrop-blur-2xl text-white font-inter text-xs fixed bottom-0 w-full h-24 z-50 border-t border-white/10 grid grid-cols-[minmax(0,1fr)_1fr_minmax(0,1fr)] items-center px-4 md:px-6 gap-4"
+      >
         
         {/* Now Playing Info */}
-        <div className="flex items-center gap-md w-1/3 min-w-0 rounded-2xl border border-white/10 bg-white/10 backdrop-blur-xl px-2 py-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.28)]">
+        <div
+          onClick={(e) => {
+            // Prevent opening the modal when clicking interactive elements inside the card
+            if (e.target instanceof HTMLElement && e.target.closest('button, a')) return
+            if (!currentTrack) return
+            setIsNowPlayingOpen(true)
+          }}
+          className="justify-self-start inline-flex items-center gap-md flex-none min-w-0 rounded-2xl border border-white/10 bg-white/10 backdrop-blur-xl px-2 py-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.28)] max-w-[min(520px,calc(100vw-18rem))] cursor-pointer"
+          style={{ width: currentTrack ? `${getNowPlayingPanelWidth(currentTrack.title)}px` : '220px' }}
+        >
           {currentTrack ? (
             <>
               <img src={currentTrack.thumbnail} alt="Album Art" className="w-14 h-14 rounded-md object-cover hidden sm:block shadow-md" />
@@ -701,7 +1044,7 @@ export default function App() {
         </div>
 
         {/* Controls & Scrubber */}
-        <div className="flex flex-col items-center justify-center w-full max-w-md md:w-1/3">
+        <div className="player-controls-center justify-self-center flex flex-col items-center justify-center w-full">
           <div className="flex items-center gap-4 md:gap-6 mb-2">
             <button onClick={() => setShuffle(!shuffle)} className={`hidden sm:block hover:scale-110 transition-transform ${shuffle ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
               <Icon name="shuffle" />
@@ -734,7 +1077,7 @@ export default function App() {
         </div>
 
         {/* Volume & Extras (Desktop) */}
-        <div className="flex items-center justify-end gap-4 w-1/3 hidden md:flex text-zinc-400">
+        <div className="player-right justify-self-end hidden md:flex items-center justify-end gap-4 text-zinc-400 min-w-0">
           <button onClick={() => setActiveNav('queue')} className={`hover:text-white hover:scale-110 transition-transform ${activeNav === 'queue' ? 'text-primary' : ''}`}>
             <Icon name="queue_music" className="text-[20px]" />
           </button>
@@ -777,6 +1120,97 @@ export default function App() {
         </button>
       </nav>
       
+      {/* Now Playing Modal */}
+      {isNowPlayingOpen && currentTrack && createPortal(
+        <div
+          className="fixed inset-0 flex items-center justify-center"
+          style={{ zIndex: 2147483647 }}
+          onClick={(e) => {
+            // close when clicking outside the modal inner content (allow clicks on controls)
+            const clickedInsideModal = e.target instanceof HTMLElement && !!e.target.closest('.nowplaying-inner')
+            if (!clickedInsideModal) setIsNowPlayingOpen(false)
+          }}
+        >
+          <div
+            className="absolute inset-0 bg-center bg-cover"
+            style={{
+              backgroundImage: `url(${currentTrack.thumbnail})`,
+              filter: 'blur(28px) brightness(0.45) saturate(0.8)',
+              backgroundPosition: 'center',
+              backgroundSize: '160%',
+              backgroundRepeat: 'no-repeat'
+            }}
+          />
+          <div className="absolute inset-0 bg-black/48" />
+
+          <div className="nowplaying-inner relative z-10 flex flex-col items-center gap-6 p-6 max-w-[920px] w-full mx-4">
+            <div className="nowplaying-cover rounded-2xl overflow-hidden shadow-2xl bg-black/40">
+              {!modalImageLoaded && !modalImageError && (
+                <div className="w-[min(520px,90vw)] h-[min(520px,90vw)] flex items-center justify-center bg-zinc-900/30">
+                  <div className="w-8 h-8 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
+
+              {modalImageError && (
+                <div className="w-[min(520px,90vw)] h-[min(520px,90vw)] flex items-center justify-center bg-zinc-800 text-zinc-400">
+                  <Icon name="music_note" className="text-4xl" />
+                </div>
+              )}
+
+              {!modalImageError && (
+                <img
+                  src={currentTrack.thumbnail}
+                  alt={currentTrack.title}
+                  className={`w-[min(520px,90vw)] h-auto object-cover block ${modalImageLoaded ? '' : 'hidden'}`}
+                  onLoad={() => setModalImageLoaded(true)}
+                  onError={() => { setModalImageError(true); setModalImageLoaded(false) }}
+                />
+              )}
+            </div>
+
+            <div className="text-center">
+              <h3 className="text-white text-2xl font-semibold truncate">{currentTrack.title}</h3>
+              <p className="text-zinc-300 mt-1">{currentTrack.artist}</p>
+            </div>
+
+            <div className="w-full max-w-2xl px-4">
+              <div className="flex items-center gap-3 justify-center mb-3">
+                <button onClick={() => setShuffle(!shuffle)} className={`hover:scale-110 transition-transform ${shuffle ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
+                  <Icon name="shuffle" />
+                </button>
+                <button onClick={playPrev} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
+                  <Icon name="skip_previous" />
+                </button>
+                <button onClick={togglePlay} className="text-black hover:scale-105 transition-transform bg-white rounded-full flex items-center justify-center p-2 w-12 h-12 shadow-lg">
+                  {isLoading ? (
+                    <div className="w-5 h-5 border-2 border-black border-t-transparent rounded-full animate-spin"></div>
+                  ) : (
+                    <Icon name={isPlaying ? 'pause' : 'play_arrow'} />
+                  )}
+                </button>
+                <button onClick={playNext} className="text-zinc-400 hover:text-white hover:scale-110 transition-transform">
+                  <Icon name="skip_next" />
+                </button>
+                <button onClick={() => setRepeat((repeat + 1) % 3)} className={`hidden sm:block hover:scale-110 transition-transform ${repeat > 0 ? 'text-primary' : 'text-zinc-400 hover:text-white'}`}>
+                  <Icon name={repeat === 2 ? 'repeat_one' : 'repeat'} />
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-zinc-300 w-12 text-right">{formatTime(currentTime)}</span>
+                <div className="h-1.5 flex-1 bg-zinc-800 rounded-full overflow-hidden group cursor-pointer relative" onClick={(e) => handleSeek(e)}>
+                  <div className="h-full bg-white group-hover:bg-primary transition-colors rounded-full relative" style={{ width: `${progress}%` }}></div>
+                </div>
+                <span className="text-sm text-zinc-300 w-12 text-left">{formatTime(duration)}</span>
+              </div>
+
+              <div className="mt-4">
+                <canvas ref={visualizerCanvasRef} className="w-full h-24 bg-transparent" />
+              </div>
+            </div>
+          </div>
+        </div>, document.body
+      )}
     </div>
   )
 }
