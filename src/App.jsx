@@ -894,8 +894,16 @@ export default function App() {
               </button>
             </div>
 
-            <button onClick={() => setActiveNav('profile')} className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 flex items-center justify-center">
-              <Icon name="person" className="text-zinc-400" />
+            <button onClick={() => setActiveNav('profile')} className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 flex items-center justify-center text-sm font-bold text-white shadow-lg transition-transform hover:scale-110" title="Profile">
+              {getDisplayAvatarUrl(profileAvatarUrl || session?.user?.user_metadata?.avatar_url) ? (
+                <img 
+                  className="w-full h-full object-cover" 
+                  alt="Profile" 
+                  src={getDisplayAvatarUrl(profileAvatarUrl || session?.user?.user_metadata?.avatar_url)}
+                />
+              ) : (
+                <span className="text-white text-xs font-bold">{session?.user?.email?.[0].toUpperCase() || '?'}</span>
+              )}
             </button>
           </div>
         </header>
