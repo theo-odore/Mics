@@ -108,11 +108,8 @@ export default function App() {
   const [searchResults, setSearchResults] = useState([])
   const [searching, setSearching] = useState(false)
   
-  const [trending, setTrending] = useState([])
   const [session, setSession] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
-  const [trendingScope, setTrendingScope] = useState('global') // 'global' or 'national'
-  const [trendingCountry, setTrendingCountry] = useState(() => (navigator?.language?.toUpperCase?.()?.includes('IN') ? 'IN' : 'US'))
   const [recentlyPlayed, setRecentlyPlayed] = useState(() => {
     try { return JSON.parse(localStorage.getItem('mics_recent') || '[]') }
     catch { return [] }
@@ -330,27 +327,12 @@ export default function App() {
     isVolumeScrubbingRef.current = false
   }, [])
 
-  // ===== Load trending (global or national) =====
-  useEffect(() => {
-    const scope = trendingScope || 'global'
-    const countryParam = scope === 'national' ? `?country=${encodeURIComponent(trendingCountry)}` : ''
-    const url = `${API}/trending${countryParam}${scope === 'national' ? `&scope=national` : (countryParam ? '&scope=global' : '')}`
-    fetch(url)
-      .then(r => r.json())
-      .then(t => { if (t && t.length) setTrending(t) })
-      .catch(() => {})
-  }, [trendingScope, trendingCountry])
-
   // ===== Try server-side geolocation, fallback to navigator.language =====
   useEffect(() => {
     let mounted = true
     fetch(`${API}/geolocate`).then(r => r.json()).then(j => {
       if (!mounted) return
-      if (j && j.country) {
-        setTrendingCountry(j.country.toUpperCase())
-        // if the country is India, default to national trending
-        if (j.country.toUpperCase() === 'IN') setTrendingScope('national')
-      }
+      // geolocation successful, but not used for trending anymore
     }).catch(() => {
       // fallback already handled by initial state
     })
@@ -391,7 +373,7 @@ export default function App() {
   }, [session?.user?.id])
 
   useEffect(() => {
-    const targetCover = currentTrack?.thumbnail || trending[0]?.thumbnail
+    const targetCover = currentTrack?.thumbnail
     if (!targetCover) return
     let cancelled = false
 
@@ -402,7 +384,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [currentTrack?.thumbnail, trending])
+  }, [currentTrack?.thumbnail])
 
   // Apply ambient intensity to CSS variable and persist
   useEffect(() => {
@@ -931,116 +913,6 @@ export default function App() {
                   </div>
                 </section>
               )}
-              
-              <section className="mb-16">
-                <div className="flex items-center justify-between mb-8">
-                  <h2 className="font-headline-md text-3xl font-black tracking-tight text-white flex items-center gap-3">
-                    <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-emerald-400 drop-shadow-sm">Trending</span>
-                    <span className="text-zinc-300 text-base">{trendingScope === 'global' ? 'Global' : `Top in ${trendingCountry}`}</span>
-                    <Icon name="local_fire_department" className="text-primary text-3xl animate-pulse drop-shadow-[0_0_15px_rgba(83,224,118,0.5)]" />
-                  </h2>
-
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => setTrendingScope('global')} className={`px-3 py-1 rounded ${trendingScope === 'global' ? 'bg-white text-black' : 'bg-white/5 text-white/80 hover:bg-white/10'}`}>
-                      Global
-                    </button>
-                    <button onClick={() => { setTrendingScope('national'); }} className={`px-3 py-1 rounded ${trendingScope === 'national' ? 'bg-white text-black' : 'bg-white/5 text-white/80 hover:bg-white/10'}`}>
-                      National
-                    </button>
-                    {trendingScope === 'national' && (
-                      <select value={trendingCountry} onChange={(e) => setTrendingCountry(e.target.value)} className="ml-2 bg-[#2b2b2b] text-white px-2 py-1 rounded">
-                        <option value="IN">India</option>
-                        <option value="US">United States</option>
-                        <option value="GB">United Kingdom</option>
-                        <option value="CA">Canada</option>
-                        <option value="AU">Australia</option>
-                      </select>
-                    )}
-                  </div>
-                </div>
-
-                {trending.length > 0 && (
-                  <div className="grid grid-cols-2 md:grid-cols-4 md:grid-rows-2 gap-4 md:h-[420px]">
-                    {/* #1 Track - Massive Hero Item */}
-                    <div 
-                      onClick={() => playTrack(trending[0])}
-                      className="col-span-2 row-span-2 relative rounded-[32px] overflow-hidden cursor-pointer group shadow-2xl border border-white/5 hover:border-primary/30 transition-colors duration-500"
-                    >
-                      <img src={trending[0].thumbnail} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-700 ease-out" alt={trending[0].title} />
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/40 to-transparent"></div>
-                      
-                      <div className="absolute top-5 left-5 w-14 h-14 bg-black/40 backdrop-blur-xl rounded-2xl flex items-center justify-center border border-white/10 shadow-lg">
-                        <span className="text-primary font-black text-2xl drop-shadow-[0_0_10px_rgba(83,224,118,0.8)]">#1</span>
-                      </div>
-
-                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                        <div className="w-20 h-20 bg-primary/90 text-black rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(83,224,118,0.6)] backdrop-blur-md scale-90 group-hover:scale-100 transition-transform duration-300">
-                          <Icon name="play_arrow" className="text-5xl ml-1" />
-                        </div>
-                      </div>
-
-                      <div className="absolute bottom-0 left-0 w-full p-6 md:p-8">
-                        <h3 className="text-3xl md:text-5xl font-black text-white mb-2 leading-tight tracking-tight drop-shadow-xl">{trending[0].title}</h3>
-                        <p className="text-lg md:text-xl text-zinc-300 font-medium drop-shadow-md">{trending[0].artist}</p>
-                      </div>
-                    </div>
-
-                    {/* Tracks 2-5 */}
-                    {trending.slice(1, 5).map((track, i) => (
-                      <div 
-                        key={track.id}
-                        onClick={() => playTrack(track)}
-                        className="relative rounded-3xl overflow-hidden cursor-pointer group shadow-lg border border-white/5 hover:border-white/20 transition-all duration-300"
-                      >
-                        <img src={track.thumbnail} className="absolute inset-0 w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 ease-out" alt={track.title} />
-                        <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/20 to-transparent opacity-80 group-hover:opacity-100 transition-opacity"></div>
-                        
-                        <div className="absolute top-3 left-3 w-8 h-8 bg-black/40 backdrop-blur-md rounded-xl flex items-center justify-center border border-white/10">
-                          <span className="text-white font-bold text-sm">#{i + 2}</span>
-                        </div>
-
-                        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                          <div className="w-12 h-12 bg-primary text-black rounded-full flex items-center justify-center shadow-[0_0_20px_rgba(83,224,118,0.5)] scale-75 group-hover:scale-100 transition-transform duration-300">
-                            <Icon name="play_arrow" className="text-3xl ml-0.5" />
-                          </div>
-                        </div>
-
-                        <div className="absolute bottom-0 left-0 w-full p-4">
-                          <h3 className="text-base md:text-lg font-bold text-white truncate mb-1 drop-shadow-md">{track.title}</h3>
-                          <p className="text-xs md:text-sm text-zinc-300 truncate drop-shadow-md">{track.artist}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                
-                {/* Tracks 6-10 List Style */}
-                {trending.length > 5 && (
-                  <div className="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {trending.slice(5, 11).map((track, i) => (
-                      <div 
-                        key={track.id}
-                        onClick={() => playTrack(track)}
-                        className="flex items-center gap-4 bg-zinc-900/40 hover:bg-zinc-800/80 p-3 rounded-2xl cursor-pointer transition-all duration-300 border border-transparent hover:border-white/10 group shadow-sm hover:shadow-md"
-                      >
-                        <div className="w-8 text-center font-black text-xl text-zinc-600 group-hover:text-primary transition-colors">
-                          {i + 6}
-                        </div>
-                        <div className="w-12 h-12 md:w-14 md:h-14 relative rounded-[14px] overflow-hidden shrink-0 shadow-md">
-                          <img src={track.thumbnail} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" alt={track.title} />
-                          <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                            <Icon name="play_arrow" className="text-white text-xl" />
-                          </div>
-                        </div>
-                        <div className="flex-1 min-w-0 pr-2">
-                          <h4 className="font-bold text-sm md:text-base text-white truncate">{track.title}</h4>
-                          <p className="text-xs text-zinc-400 truncate mt-0.5">{track.artist}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
             </>
           )}
 
