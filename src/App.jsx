@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
+import AuthPage from './AuthPage.jsx'
+import { supabase, supabaseConfigured } from './supabase.js'
 
 const API = 'http://localhost:3001/api'
 
@@ -107,6 +109,8 @@ export default function App() {
   const [searching, setSearching] = useState(false)
   
   const [trending, setTrending] = useState([])
+  const [session, setSession] = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
   const [trendingScope, setTrendingScope] = useState('global') // 'global' or 'national'
   const [trendingCountry, setTrendingCountry] = useState(() => (navigator?.language?.toUpperCase?.()?.includes('IN') ? 'IN' : 'US'))
   const [recentlyPlayed, setRecentlyPlayed] = useState(() => {
@@ -124,6 +128,10 @@ export default function App() {
   const footerRef = useRef(null)
   const [modalImageLoaded, setModalImageLoaded] = useState(false)
   const [modalImageError, setModalImageError] = useState(false)
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState('')
+  const [uploadingAvatar, setUploadingAvatar] = useState(false)
+  const avatarInputRef = useRef(null)
+  const [artistImages, setArtistImages] = useState({})
   const visualizerCanvasRef = useRef(null)
   const audioCtxRef = useRef(null)
   const analyserRef = useRef(null)
@@ -138,6 +146,48 @@ export default function App() {
   const isVolumeScrubbingRef = useRef(false)
   // Stores API-provided duration; fallback when audio.duration is Infinity (chunked stream)
   const trackDurationRef = useRef(0)
+
+  // Helper to get safe avatar URL (fallback if Supabase URL is invalid)
+  const getDisplayAvatarUrl = (url) => {
+    if (!url) return null
+    if (typeof url !== 'string') return null
+    if (url.includes('supabase')) return url
+    if (url.includes('http')) return url
+    return null
+  }
+
+  // Avatar upload handler
+  const handleAvatarUpload = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file || !supabaseConfigured) return
+    setUploadingAvatar(true)
+    try {
+      const filename = `${session?.user?.id}-${Date.now()}`
+      const { error, data } = await supabase.storage.from('profile-pictures').upload(filename, file, { upsert: true })
+      if (error) throw error
+      const publicUrl = supabase.storage.from('profile-pictures').getPublicUrl(filename).data.publicUrl
+      setProfileAvatarUrl(publicUrl)
+      await supabase.auth.updateUser({ data: { avatar_url: publicUrl } })
+    } catch (err) {
+      console.error('Avatar upload failed:', err)
+    } finally {
+      setUploadingAvatar(false)
+      if (avatarInputRef.current) avatarInputRef.current.value = ''
+    }
+  }
+
+  // Sign out handler
+  const handleSignOut = async () => {
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current.src = ''
+    }
+    setCurrentTrack(null)
+    setQueue([])
+    setIsPlaying(false)
+    await supabase.auth.signOut()
+    setSession(null)
+  }
 
   // ===== Audio Engine =====
   useEffect(() => {
@@ -306,6 +356,39 @@ export default function App() {
     })
     return () => { mounted = false }
   }, [])
+
+  // ===== Supabase auth session handling =====
+  useEffect(() => {
+    let mounted = true
+
+    ;(async () => {
+      try {
+        const { data } = await supabase.auth.getSession()
+        if (!mounted) return
+        setSession(data?.session ?? null)
+      } catch (e) {
+        // ignore
+      }
+      if (mounted) setAuthLoading(false)
+    })()
+
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mounted) return
+      setSession(session ?? null)
+    })
+
+    return () => {
+      mounted = false
+      try { sub?.subscription?.unsubscribe && sub.subscription.unsubscribe() } catch {}
+    }
+  }, [])
+
+  // ===== Load profile avatar from session metadata =====
+  useEffect(() => {
+    if (session?.user?.user_metadata?.avatar_url) {
+      setProfileAvatarUrl(session.user.user_metadata.avatar_url)
+    }
+  }, [session?.user?.id])
 
   useEffect(() => {
     const targetCover = currentTrack?.thumbnail || trending[0]?.thumbnail
@@ -741,6 +824,18 @@ export default function App() {
     </div>
   )
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#070a10] flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  if (!session) {
+    return <AuthPage ambientRgb={ambientRgb} />
+  }
+
   return (
     <div
       className="relative text-on-surface font-body-md antialiased min-h-screen flex overflow-hidden"
@@ -771,6 +866,9 @@ export default function App() {
           </button>
           <button onClick={() => setActiveNav('library')} className={`flex items-center gap-md px-md py-sm rounded-lg transition-colors duration-200 w-full text-left ${activeNav === 'library' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'}`}>
             <Icon name="library_music" /> <span>Your Library</span>
+          </button>
+          <button onClick={() => setActiveNav('profile')} className={`flex items-center gap-md px-md py-sm rounded-lg transition-colors duration-200 w-full text-left ${activeNav === 'profile' ? 'bg-zinc-800 text-white border-l-4 border-primary' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'}`}>
+            <Icon name="person" className={activeNav === 'profile' ? 'text-primary' : ''} /> <span className={activeNav === 'profile' ? 'font-bold' : ''}>Profile</span>
           </button>
         </div>
         
@@ -814,7 +912,7 @@ export default function App() {
               </button>
             </div>
 
-            <button className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 flex items-center justify-center">
+            <button onClick={() => setActiveNav('profile')} className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 flex items-center justify-center">
               <Icon name="person" className="text-zinc-400" />
             </button>
           </div>
@@ -994,6 +1092,93 @@ export default function App() {
                  {queue.length === 0 && <p className="text-zinc-500 py-10">Queue is empty.</p>}
                </div>
             </section>
+          )}
+
+          {/* PROFILE VIEW */}
+          {activeNav === 'profile' && (
+            <div className="space-y-12 pb-12 animate-in fade-in duration-500">
+              {/* Profile Hero Section */}
+              <section className="relative pt-12 pb-8 flex items-end gap-8 bg-gradient-to-b from-zinc-800/30 to-transparent rounded-[2rem] px-8 border border-white/5 shadow-2xl">
+                <div className="relative group shrink-0 rounded-full bg-zinc-900 p-[4px] shadow-2xl">
+                  <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleAvatarUpload}
+                    className="hidden"
+                  />
+                  <div className="rounded-full bg-black p-[4px]">
+                    <div className="w-40 h-40 md:w-48 md:h-48 rounded-full overflow-hidden bg-zinc-800 flex items-center justify-center text-6xl font-bold text-zinc-500 relative transform-gpu">
+                      {getDisplayAvatarUrl(profileAvatarUrl || session?.user?.user_metadata?.avatar_url) ? (
+                        <img 
+                          className="absolute inset-0 w-full h-full object-cover object-center scale-[1.02]" 
+                          alt="Profile" 
+                          src={getDisplayAvatarUrl(profileAvatarUrl || session?.user?.user_metadata?.avatar_url)}
+                        />
+                      ) : (
+                        session?.user?.email?.[0].toUpperCase() || '?'
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => avatarInputRef.current?.click()}
+                        className="absolute inset-0 z-10 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center w-full h-full text-white"
+                      >
+                        <Icon name="photo_camera" className="text-white text-3xl" />
+                        <span className="text-[10px] font-bold uppercase tracking-widest mt-2">Change Photo</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-primary mb-2">User Profile</p>
+                  <h2 className="font-headline-xl text-4xl md:text-6xl text-white mb-4 font-black tracking-tight drop-shadow-lg truncate">
+                    {session?.user?.user_metadata?.full_name || session?.user?.email?.split('@')[0] || 'User'}
+                  </h2>
+                  <div className="flex flex-col md:flex-row md:items-center gap-4 md:gap-6 text-sm font-medium text-zinc-400">
+                    <p className="text-xs text-zinc-500">{session?.user?.email}</p>
+                    <div className="hidden md:block h-4 w-[1px] bg-zinc-700"></div>
+                    <div className="flex gap-2 mt-2 md:mt-0 w-full md:w-auto">
+                      <button
+                        onClick={() => avatarInputRef.current?.click()}
+                        disabled={uploadingAvatar}
+                        className="bg-zinc-800 text-white font-bold py-[6px] px-6 rounded-lg hover:bg-zinc-700 transition-colors text-sm flex-1 md:flex-none text-center disabled:opacity-50"
+                      >
+                        {uploadingAvatar ? 'Uploading...' : 'Change photo'}
+                      </button>
+                      <button 
+                        onClick={handleSignOut}
+                        className="bg-zinc-800 text-white font-bold py-[6px] px-3 rounded-lg hover:bg-red-500/20 hover:text-red-400 transition-colors flex items-center justify-center shrink-0"
+                        title="Sign Out"
+                      >
+                        <Icon name="logout" className="text-sm" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              {/* Quick Stats */}
+              <section>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6">
+                  <div className="bg-[#121212]/80 backdrop-blur-md p-6 rounded-2xl border border-white/5 hover:border-white/10 transition-all">
+                    <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Email</p>
+                    <h3 className="text-sm font-semibold text-white truncate">{session?.user?.email}</h3>
+                  </div>
+                  <div className="bg-[#121212]/80 backdrop-blur-md p-6 rounded-2xl border border-white/5 hover:border-white/10 transition-all">
+                    <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Account Status</p>
+                    <h3 className="text-sm font-semibold text-primary">Active</h3>
+                  </div>
+                  <div className="bg-[#121212]/80 backdrop-blur-md p-6 rounded-2xl border border-white/5 hover:border-white/10 transition-all">
+                    <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Liked Songs</p>
+                    <h3 className="text-sm font-semibold text-white">{likedTracks.length}</h3>
+                  </div>
+                  <div className="bg-[#121212]/80 backdrop-blur-md p-6 rounded-2xl border border-white/5 hover:border-white/10 transition-all">
+                    <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Recently Played</p>
+                    <h3 className="text-sm font-semibold text-white">{recentlyPlayed.length}</h3>
+                  </div>
+                </div>
+              </section>
+            </div>
           )}
           
         </div>
