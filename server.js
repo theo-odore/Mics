@@ -196,6 +196,27 @@ app.get('/api/search/suggestions', async (req, res) => {
   }
 })
 
+// ===== Get Artist Image =====
+app.get('/api/artist-image', async (req, res) => {
+  const q = req.query.q
+  if (!q) return res.json({ url: null })
+
+  try {
+    if (await ensureYTMusic()) {
+      const artists = await ytmusic.searchArtists(q)
+      if (artists && artists.length > 0) {
+        const artist = artists[0]
+        const thumb = getBestThumbnail(artist.thumbnails, null)
+        return res.json({ url: thumb })
+      }
+    }
+    res.json({ url: null })
+  } catch (err) {
+    console.error('Artist image error:', err.message)
+    res.json({ url: null })
+  }
+})
+
 // ===== Get Up Next (Related Songs) =====
 app.get('/api/suggestions/:id', async (req, res) => {
   try {
@@ -205,13 +226,16 @@ app.get('/api/suggestions/:id', async (req, res) => {
         const upNext = await ytmusic.getUpNexts(req.params.id)
         if (upNext && upNext.length > 0) {
           const tracks = upNext
-            .filter(t => t.videoId !== req.params.id)
+            .filter(t => {
+              const tid = t.videoId || t.id;
+              return tid && tid !== req.params.id;
+            })
             .map(t => ({
-              id: t.videoId,
+              id: t.videoId || t.id,
               title: t.title || t.name || '',
               artist: t.artists || t.artist?.name || '',
-              thumbnail: getBestThumbnail(t.thumbnails, t.videoId) || `https://i.ytimg.com/vi/${t.videoId}/hqdefault.jpg`,
-              duration: t.duration ? parseDuration(t.duration) : 0,
+              thumbnail: getBestThumbnail(t.thumbnails, t.videoId || t.id) || `https://i.ytimg.com/vi/${t.videoId || t.id}/hqdefault.jpg`,
+              duration: t.duration ? (typeof t.duration === 'number' ? t.duration : parseDuration(t.duration)) : 0,
             }))
           console.log(`[UpNext] YTMusic: ${req.params.id} → ${tracks.length} tracks`)
           return res.json(tracks)
