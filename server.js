@@ -821,10 +821,26 @@ app.get('/api/precache/:id', async (req, res) => {
   }
 });
 
+// Helper to recursively find nodes in JSON objects
+function findNodes(obj, key) {
+  const nodes = [];
+  function recurse(curr) {
+    if (!curr || typeof curr !== 'object') return;
+    if (curr[key]) {
+      nodes.push(curr[key]);
+    }
+    for (const k of Object.keys(curr)) {
+      recurse(curr[k]);
+    }
+  }
+  recurse(obj);
+  return nodes;
+}
+
 // ===== Fetch Playlist =====
 app.get('/api/playlist', async (req, res) => {
   const url = req.query.url;
-  if (!url) return res.status(400).json({ error: 'Missing playlist URL' });
+  if (!url) return res.status(400).json({ error: 'Missing playlist URL or ID' });
 
   try {
     let playlistId = url;
@@ -838,22 +854,92 @@ app.get('/api/playlist', async (req, res) => {
       // Not a valid URL, assume it's an ID
     }
 
-    // Primary: YTMusic API
+    // Ensure the ID has the VL prefix for InnerTube browse if it's one of the known formats:
+    // PL..., RDCLAK..., OLAK...
+    // Also, if it doesn't already start with VL
+    if (!playlistId.startsWith('VL')) {
+      if (playlistId.startsWith('PL') || playlistId.startsWith('RDCLAK') || playlistId.startsWith('OLAK')) {
+        playlistId = 'VL' + playlistId;
+      }
+    }
+
+    // Primary: YTMusic API custom extraction
     if (await ensureYTMusic()) {
       try {
-        const playlist = await ytmusic.getPlaylist(playlistId);
-        if (playlist && playlist.videos && playlist.videos.length > 0) {
-          const tracks = playlist.videos.map(v => ({
-            id: v.videoId || v.id,
-            title: v.name || v.title || '',
-            artist: (v.artists && v.artists.map(a => a.name).join(', ')) || v.artist?.name || '',
-            thumbnail: getBestThumbnail(v.thumbnails, v.videoId || v.id) || `https://i.ytimg.com/vi/${v.videoId || v.id}/hqdefault.jpg`,
-            duration: v.duration ? (typeof v.duration === 'number' ? v.duration : parseDuration(v.duration)) : 0,
-          }));
-          return res.json({ id: playlist.playlistId || playlistId, title: playlist.name || 'Imported Playlist', tracks });
+        const rawData = await ytmusic.constructRequest("browse", { browseId: playlistId });
+        
+        let title = 'Imported Playlist';
+        let artistName = '';
+        
+        // Extract playlist/album name
+        if (rawData.header?.musicHeaderRenderer?.title?.runs?.[0]?.text) {
+          title = rawData.header.musicHeaderRenderer.title.runs[0].text;
+        } else if (rawData.header?.musicDetailHeaderRenderer?.title?.runs?.[0]?.text) {
+          title = rawData.header.musicDetailHeaderRenderer.title.runs[0].text;
+        } else if (rawData.contents?.twoColumnBrowseResultsRenderer?.secondaryContents?.musicPlaylistShelfRenderer?.title?.runs?.[0]?.text) {
+          title = rawData.contents.twoColumnBrowseResultsRenderer.secondaryContents.musicPlaylistShelfRenderer.title.runs[0].text;
+        }
+        
+        // Extract artist or description
+        if (rawData.header?.musicDetailHeaderRenderer?.subtitle?.runs) {
+          artistName = rawData.header.musicDetailHeaderRenderer.subtitle.runs.map(r => r.text).join('');
+        }
+
+        const items = findNodes(rawData, "musicResponsiveListItemRenderer");
+        if (items && items.length > 0) {
+          const tracks = items.map(item => {
+            try {
+              const videoId = item.playlistItemData?.videoId || item.videoId;
+              if (!videoId) return null;
+
+              let trackTitle = "Unknown Title";
+              const flexColumns = item.flexColumns || [];
+              if (flexColumns[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]) {
+                trackTitle = flexColumns[0].musicResponsiveListItemFlexColumnRenderer.text.runs[0].text;
+              }
+
+              let trackArtist = "Unknown Artist";
+              if (flexColumns[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs) {
+                const runs = flexColumns[1].musicResponsiveListItemFlexColumnRenderer.text.runs;
+                trackArtist = runs[0]?.text || "Unknown Artist";
+              }
+
+              let duration = 0;
+              const fixedColumns = item.fixedColumns || [];
+              if (fixedColumns[0]?.musicResponsiveListItemFixedColumnRenderer?.text?.runs?.[0]?.text) {
+                const durStr = fixedColumns[0].musicResponsiveListItemFixedColumnRenderer.text.runs[0].text;
+                duration = parseDuration(durStr);
+              }
+
+              let thumbnail = "";
+              if (item.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails?.[0]?.url) {
+                const thumbs = item.thumbnail.musicThumbnailRenderer.thumbnail.thumbnails;
+                const sorted = [...thumbs].sort((a, b) => (b.width || 0) - (a.width || 0));
+                thumbnail = sorted[0]?.url || "";
+              }
+
+              return {
+                id: videoId,
+                title: trackTitle,
+                artist: trackArtist,
+                thumbnail: proxyThumb(thumbnail),
+                duration
+              };
+            } catch (err) {
+              return null;
+            }
+          }).filter(Boolean);
+
+          console.log(`[Playlist] Loaded ${tracks.length} tracks for ${playlistId}`);
+          return res.json({
+            id: playlistId,
+            title: title || 'Imported Playlist',
+            artist: artistName || '',
+            tracks
+          });
         }
       } catch (err) {
-        console.warn(`[Playlist] YTMusic failed:`, err.message?.slice(0, 80));
+        console.warn(`[Playlist] Custom fetch failed for ${playlistId}:`, err.message?.slice(0, 80));
       }
     }
 
@@ -861,7 +947,6 @@ app.get('/api/playlist', async (req, res) => {
     const playlist = await YouTube.getPlaylist(url);
     if (!playlist) return res.status(404).json({ error: 'Playlist not found' });
     
-    // Fetch all tracks if it's a large playlist (youtube-sr handles pagination implicitly or via fetch)
     const tracks = (playlist.videos || []).map(v => mapYouTubeSrTrack(v));
     res.json({ id: playlist.id || playlistId, title: playlist.title || 'Imported Playlist', tracks });
   } catch (err) {

@@ -67,6 +67,14 @@ const rightPathVariants = {
 };
 
 
+const isPlayableTrack = (t) => {
+  if (!t) return false;
+  const id = t.id || t.videoId || "";
+  const type = (t.type || "").toUpperCase();
+  const hasPlaylistIndicator = t.playlistId || id.startsWith('PL') || id.startsWith('RDCLAK') || id.startsWith('OLAK') || id.startsWith('MPREb');
+  return !(type === 'ALBUM' || type === 'PLAYLIST' || hasPlaylistIndicator);
+};
+
 const MOCK_ARTISTS = {
   'the midnight soul': {
     name: 'The Midnight Soul',
@@ -1338,7 +1346,7 @@ function YourApp({ initialPlayerState }) {
     const initialTracks = [
       ...defaultLibraryItems,
       ...Object.values(MOCK_ARTISTS).flatMap(a => a.tracks || [])
-    ];
+    ].filter(isPlayableTrack);
     const unique = [];
     const seen = new Set();
     initialTracks.forEach(t => {
@@ -1357,7 +1365,7 @@ function YourApp({ initialPlayerState }) {
       ...searchResults,
       ...libraryItems,
       ...speedDialItems
-    ];
+    ].filter(isPlayableTrack);
     
     setCatalog(prev => {
       const seen = new Set(prev.map(t => t.id));
@@ -1577,8 +1585,8 @@ function YourApp({ initialPlayerState }) {
               fetchTrendingFallback(data);
             }
             
-            // Default select the first track for display if none is loaded yet
-            const firstSong = data.find(s => s.contents && s.contents.length > 0)?.contents?.[0];
+            // Default select the first playable track for display if none is loaded yet
+            const firstSong = data.flatMap(s => s.contents || []).find(isPlayableTrack) || defaultLibraryItems[0];
             if (firstSong && !playbackStore.currentTrack) {
               setCurrentTrack(firstSong);
             }
@@ -1693,10 +1701,18 @@ function YourApp({ initialPlayerState }) {
         mainRef.current.scrollTop = 0;
       }
       try {
-        const res = await fetch(`http://${window.location.hostname}:3001/api/search?q=${encodeURIComponent(activeAlbum.title)}`);
+        const albumId = activeAlbum.id || activeAlbum.playlistId;
+        const res = await fetch(`http://${window.location.hostname}:3001/api/playlist?url=${encodeURIComponent(albumId)}`);
         if (res.ok) {
           const data = await res.json();
-          setAlbumTracks(resolveThumbnails(data) || []);
+          setAlbumTracks(resolveThumbnails(data.tracks) || []);
+        } else {
+          // Fallback to title search if playlist endpoint fails
+          const searchRes = await fetch(`http://${window.location.hostname}:3001/api/search?q=${encodeURIComponent(activeAlbum.title)}`);
+          if (searchRes.ok) {
+            const searchData = await searchRes.json();
+            setAlbumTracks(resolveThumbnails(searchData) || []);
+          }
         }
       } catch (e) {
         console.error('Failed to load album tracks:', e);
@@ -4295,7 +4311,20 @@ function YourApp({ initialPlayerState }) {
                       return (
                         <motion.div 
                           key={album.id || idx} 
-                        onClick={() => handlePlayTrack(album, mixedForYou, 'home_mixed_for_you')}
+                        onClick={() => {
+                          if (!isPlayableTrack(album)) {
+                            handleOpenAlbum({
+                              id: album.id || album.playlistId,
+                              title: album.title,
+                              artist: album.artist,
+                              thumbnail: album.thumbnail,
+                              type: album.playlistId ? 'Playlist' : 'Album',
+                              year: '2024'
+                            });
+                          } else {
+                            handlePlayTrack(album, mixedForYou, 'home_mixed_for_you');
+                          }
+                        }}
                           variants={cardVariants}
                           initial="rest"
                           whileHover="hover"
@@ -4394,11 +4423,12 @@ function YourApp({ initialPlayerState }) {
                 <section className="px-gutter">
                   <div 
                     onClick={() => {
-                      if (mixedForYou.length > 0) {
-                        handlePlayTrack(mixedForYou[0], mixedForYou, 'home_mixed_for_you');
+                      const playableMixed = mixedForYou.filter(isPlayableTrack);
+                      if (playableMixed.length > 0) {
+                        handlePlayTrack(playableMixed[0], playableMixed, 'home_mixed_for_you');
                       } else {
                         const allSongs = sections.flatMap(s => s.contents || []);
-                        const allSongTracks = allSongs.filter(s => s.type !== 'ALBUM' && s.type !== 'PLAYLIST' && !s.playlistId);
+                        const allSongTracks = allSongs.filter(isPlayableTrack);
                         if (allSongTracks.length > 0) handlePlayTrack(allSongTracks[0], allSongTracks, 'home_feed');
                       }
                     }}
