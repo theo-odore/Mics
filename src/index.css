@@ -1,90 +1,79 @@
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
+.artist-hero-gradient {
+    background: linear-gradient(180deg, rgba(15,15,15,0) 0%, rgba(15,15,15,0.8) 70%, rgba(15,15,15,1) 100%);
 }
-.no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
-}
-
-:root {
-  --ambient-rgb: 29, 185, 84;
-  --ambient-alpha: 0.27;
+.hero-gradient {
+    background: linear-gradient(180deg, rgba(147, 1, 0, 0.4) 0%, rgba(15, 15, 15, 1) 100%);
 }
 
-body {
-  margin: 0;
-  min-height: 100vh;
+.lyrics-scrollbar::-webkit-scrollbar {
+    width: 4px;
+}
+.lyrics-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+.lyrics-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.1);
+    border-radius: 10px;
+}
+.bg-gradient-dynamic {
+    background: radial-gradient(circle at 20% 30%, rgba(147, 1, 0, 0.4) 0%, rgba(15, 15, 15, 1) 70%);
 }
 
-.ambient-shell {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  overflow: hidden;
-  background:
-    radial-gradient(1150px 800px at 12% 0%, rgba(var(--ambient-rgb), var(--ambient-alpha)), transparent 62%),
-    radial-gradient(880px 700px at 100% 10%, rgba(var(--ambient-rgb), calc(var(--ambient-alpha) * 0.75)), transparent 58%),
-    linear-gradient(160deg, #05070c 0%, #080d15 50%, #0d111b 100%);
-  transition: background 750ms ease;
+.snap-x-mandatory {
+    scroll-snap-type: x mandatory;
+}
+.snap-start {
+    scroll-snap-align: start;
 }
 
-.ambient-blob {
-  position: absolute;
-  filter: blur(70px);
-  border-radius: 999px;
-  background: rgba(var(--ambient-rgb), var(--ambient-alpha));
-  transition: background 650ms ease;
+.profile-hero-gradient {
+    background: radial-gradient(circle at top right, rgba(147, 1, 0, 0.15), transparent),
+                radial-gradient(circle at bottom left, rgba(0, 40, 91, 0.2), transparent);
+}
+.glass {
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.achievement-border {
+    position: relative;
+}
+.achievement-border::after {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    background: linear-gradient(45deg, transparent, rgba(255,255,255,0.1), transparent);
+    z-index: -1;
+    border-radius: inherit;
 }
 
-.ambient-blob-a {
-  width: min(45vw, 540px);
-  height: min(45vw, 540px);
-  top: -12%;
-  left: -8%;
-  animation: ambientFloatA 18s ease-in-out infinite;
+
+@keyframes equalizerBar {
+  from { transform: scaleY(0.3); }
+  to   { transform: scaleY(1); }
 }
 
-.ambient-blob-b {
-  width: min(38vw, 480px);
-  height: min(38vw, 480px);
-  right: -9%;
-  bottom: -16%;
-  animation: ambientFloatB 22s ease-in-out infinite;
+.search-scrollbar::-webkit-scrollbar {
+    width: 4px;
+}
+.search-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+.search-scrollbar::-webkit-scrollbar-thumb {
+    background: #3f3f3f;
+    border-radius: 9999px;
 }
 
-.ambient-noise {
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(rgba(255, 255, 255, 0.05) 0.4px, transparent 0.4px);
-  background-size: 2px 2px;
-  opacity: 0.08;
-  mix-blend-mode: soft-light;
-}
-
-@keyframes ambientFloatA {
-  0%,
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
   100% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(7%, 9%, 0) scale(1.08);
+    background-position: -200% 0;
   }
 }
-
-@keyframes ambientFloatB {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(-10%, -8%, 0) scale(1.1);
-  }
-}
-
-@media (max-width: 768px) {
-  .ambient-blob-a,
-  .ambient-blob-b {
-    filter: blur(58px);
-  }
+.animate-shimmer {
+  background: linear-gradient(90deg, #282828 25%, #333333 50%, #282828 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
 }

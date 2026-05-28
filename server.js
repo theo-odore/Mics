@@ -9,12 +9,14 @@ import youtubedl from 'youtube-dl-exec'
 import https from 'https'
 import puppeteer from 'puppeteer-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
+import fs from 'fs'
+import path from 'path'
 
 puppeteer.use(StealthPlugin())
 
 const YouTube = youtubeSr.default || youtubeSr;
 const app = express()
-app.set('trust proxy', true)
+app.set('trust proxy', 1)
 const PORT = 3001
 
 app.use(cors())
@@ -35,6 +37,7 @@ const limiter = rateLimit({
   max: 60, // limit each IP to 60 requests per windowMs
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { trustProxy: false }
 })
 app.use(limiter)
 
@@ -79,11 +82,11 @@ function parseDuration(durStr) {
 // Helper: wrap thumbnail URL through our proxy for reliable loading
 function proxyThumb(url) {
   if (!url) return ''
-  // Upscale googleusercontent URLs to 544x544 through our proxy
+  // Upscale googleusercontent URLs to 1024x1024 (preferred high-res) through our proxy
   if (url.includes('googleusercontent.com') && url.includes('=w')) {
-    url = url.replace(/=w\d+-h\d+[^&\s]*/g, '=w544-h544-l90-rj')
+    url = url.replace(/=w\d+-h\d+[^&\s]*/g, '=w1024-h1024-l90-rj')
   }
-  return `http://localhost:3001/api/thumb?url=${encodeURIComponent(url)}`
+  return `/api/thumb?url=${encodeURIComponent(url)}`
 }
 
 // ===== Helper: Get best thumbnail =====
@@ -125,7 +128,26 @@ function mapYouTubeSrTrack(v) {
   }
 }
 
-// ===== Thumbnail Proxy (avoids browser rate-limiting from Google) =====
+// ===== Mashup / Compilation filter =====
+// Rejects tracks that are mashups, medleys, DJ sets, or mega-compilations
+const MASHUP_PATTERN = /\b(mashup|mash-?up|medley|mega\s*mix|megamix|nonstop|non-stop|jukebox|dj\s+mix|dj\s+set|compilation|mixtape|party\s+mix|remix\s+pack|best\s+of|ultimate\s+mix|songs?\s+collection|hits?\s+collection|all\s+songs|\d+\s+songs?|playlist\s+mix|continuous\s+mix)\b/i
+
+function isMashup(track) {
+  const haystack = `${track.title || ''} ${track.artist || ''}`
+  return MASHUP_PATTERN.test(haystack)
+}
+
+// Convenience: filter an array and log how many were dropped
+function filterMashups(tracks, source = '') {
+  const before = tracks.length
+  const clean = tracks.filter(t => !isMashup(t))
+  if (before !== clean.length) {
+    console.log(`[Mashup Filter][${source}] Dropped ${before - clean.length} of ${before} tracks`)
+  }
+  return clean
+}
+
+
 app.get('/api/thumb', async (req, res) => {
   const url = req.query.url
   if (!url) return res.status(400).end()
@@ -157,7 +179,7 @@ app.get('/api/search', async (req, res) => {
         const songs = await ytmusic.searchSongs(q)
         if (songs && songs.length > 0) {
           console.log(`[Search] YTMusic: "${q}" → ${songs.length} songs`)
-          return res.json(songs.map(mapYTMusicTrack))
+          return res.json(filterMashups(songs.map(mapYTMusicTrack), 'search-ytmusic'))
         }
       } catch (err) {
         console.warn(`[Search] YTMusic search failed for "${q}":`, err.message?.slice(0, 80))
@@ -167,12 +189,12 @@ app.get('/api/search', async (req, res) => {
     // Fallback: youtube-sr with song filtering
     console.log(`[Search] Falling back to youtube-sr for "${q}"`)
     const results = await YouTube.search(`${q} song`, { limit: 20, type: 'video' })
-    // Filter out compilations (>10 min) and non-music content
+    // Filter out compilations (>10 min), non-music, and mashups
     const filtered = results.filter(v => {
       const dur = (v.duration || 0) / 1000
       return dur > 30 && dur < 600 // Between 30s and 10 min
     })
-    res.json((filtered.length > 0 ? filtered : results).map(mapYouTubeSrTrack))
+    res.json(filterMashups((filtered.length > 0 ? filtered : results).map(mapYouTubeSrTrack), 'search-sr'))
   } catch (err) {
     console.error('Search error:', err.message)
     res.json([])
@@ -237,8 +259,9 @@ app.get('/api/suggestions/:id', async (req, res) => {
               thumbnail: getBestThumbnail(t.thumbnails, t.videoId || t.id) || `https://i.ytimg.com/vi/${t.videoId || t.id}/hqdefault.jpg`,
               duration: t.duration ? (typeof t.duration === 'number' ? t.duration : parseDuration(t.duration)) : 0,
             }))
-          console.log(`[UpNext] YTMusic: ${req.params.id} → ${tracks.length} tracks`)
-          return res.json(tracks)
+          const cleanTracks = filterMashups(tracks, 'upnext-ytmusic')
+          console.log(`[UpNext] YTMusic: ${req.params.id} → ${cleanTracks.length} tracks`)
+          return res.json(cleanTracks)
         }
       } catch (err) {
         console.warn(`[UpNext] YTMusic failed:`, err.message?.slice(0, 80))
@@ -253,9 +276,12 @@ app.get('/api/suggestions/:id', async (req, res) => {
     } catch {}
 
     const results = await YouTube.search(searchQuery, { limit: 15, type: 'video' })
-    const tracks = results
-      .filter(v => v.id !== req.params.id && (v.duration || 0) / 1000 < 600)
-      .map(mapYouTubeSrTrack)
+    const tracks = filterMashups(
+      results
+        .filter(v => v.id !== req.params.id && (v.duration || 0) / 1000 < 600)
+        .map(mapYouTubeSrTrack),
+      'upnext-sr'
+    )
     res.json(tracks)
   } catch (err) {
     console.error('Suggestions error:', err.message)
@@ -272,15 +298,18 @@ app.get('/api/home', async (req, res) => {
         if (sections && sections.length > 0) {
           const mapped = sections.map(section => ({
             title: section.title || '',
-            contents: (section.contents || []).map(item => ({
-              id: item.videoId || item.playlistId || '',
-              type: item.type || 'SONG',
-              title: item.name || item.title || '',
-              artist: item.artist?.name || item.artists || '',
-              thumbnail: getBestThumbnail(item.thumbnails, item.videoId),
-              duration: item.duration ? parseDuration(item.duration) : 0,
-              playlistId: item.playlistId || null,
-            }))
+            contents: filterMashups(
+              (section.contents || []).map(item => ({
+                id: item.videoId || item.playlistId || '',
+                type: item.type || 'SONG',
+                title: item.name || item.title || '',
+                artist: item.artist?.name || item.artists || '',
+                thumbnail: getBestThumbnail(item.thumbnails, item.videoId),
+                duration: item.duration ? parseDuration(item.duration) : 0,
+                playlistId: item.playlistId || null,
+              })),
+              `home-${section.title}`
+            )
           }))
           console.log(`[Home] ${mapped.length} sections loaded`)
           return res.json(mapped)
@@ -358,7 +387,7 @@ app.get('/api/trending', async (req, res) => {
           const songs = await ytmusic.searchSongs('trending songs 2025')
           if (songs && songs.length > 0) {
             console.log(`[Trending] YTMusic: ${songs.length} songs`)
-            const mapped = songs.map(mapYTMusicTrack)
+            const mapped = filterMashups(songs.map(mapYTMusicTrack), 'trending-ytmusic')
             global.trendingCache.set(cacheKey, { ts: Date.now(), data: mapped })
             return res.json(mapped)
           }
@@ -370,7 +399,10 @@ app.get('/api/trending', async (req, res) => {
       // Fallback: youtube-sr
       const results = await YouTube.search('trending music 2025', { limit: 20, type: 'video' })
       const filtered = results.filter(v => (v.duration || 0) / 1000 < 600)
-      const out = (filtered.length > 0 ? filtered : results).map(mapYouTubeSrTrack)
+      const out = filterMashups(
+        (filtered.length > 0 ? filtered : results).map(mapYouTubeSrTrack),
+        'trending-sr'
+      )
       global.trendingCache.set(cacheKey, { ts: Date.now(), data: out })
       res.json(out)
     } catch (err) {
@@ -593,10 +625,52 @@ async function extractPrimary(id, attempt = 1) {
   }
 }
 
+const CACHE_DIR = path.join(process.cwd(), 'cache')
+if (!fs.existsSync(CACHE_DIR)) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true })
+}
+const downloadingLocks = new Set()
+
 // ===== Stream audio =====
 app.get('/api/stream/:id', async (req, res) => {
   try {
     const id = req.params.id
+    const cacheFilePath = path.join(CACHE_DIR, `${id}.audio`)
+
+    // 1. Serve from local cache if available
+    if (fs.existsSync(cacheFilePath)) {
+      const stat = fs.statSync(cacheFilePath)
+      const fileSize = stat.size
+      const range = req.headers.range
+
+      if (range) {
+        const parts = range.replace(/bytes=/, '').split('-')
+        const start = parseInt(parts[0], 10)
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1
+        const chunksize = (end - start) + 1
+        const fileStream = fs.createReadStream(cacheFilePath, { start, end })
+        const head = {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunksize,
+          'Content-Type': 'audio/webm',
+          'Access-Control-Allow-Origin': '*'
+        }
+        res.writeHead(206, head)
+        fileStream.pipe(res)
+      } else {
+        const head = {
+          'Content-Length': fileSize,
+          'Content-Type': 'audio/webm',
+          'Access-Control-Allow-Origin': '*'
+        }
+        res.writeHead(200, head)
+        fs.createReadStream(cacheFilePath).pipe(res)
+      }
+      return
+    }
+
+    // 2. Fetch direct URL if not cached
     let directUrl = urlCache.get(id)
 
     if (!directUrl) {
@@ -611,6 +685,46 @@ app.get('/api/stream/:id', async (req, res) => {
       setTimeout(() => urlCache.delete(id), 5 * 60 * 1000)
     }
 
+    // 3. Asynchronously download the track to local cache in the background
+    const tempCachePath = path.join(CACHE_DIR, `${id}.audio.download`)
+    if (!downloadingLocks.has(id)) {
+      downloadingLocks.add(id)
+      const downloadOptions = {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+        }
+      }
+      https.get(directUrl, downloadOptions, (downloadRes) => {
+        if (downloadRes.statusCode === 200) {
+          const fileStream = fs.createWriteStream(tempCachePath)
+          downloadRes.pipe(fileStream)
+          fileStream.on('finish', () => {
+            fileStream.close(() => {
+              try {
+                if (fs.existsSync(tempCachePath)) {
+                  fs.renameSync(tempCachePath, cacheFilePath)
+                  console.log(`[Cache] Downloaded and cached ${id}`)
+                }
+              } catch (e) {}
+              downloadingLocks.delete(id)
+            })
+          })
+          downloadRes.on('error', () => {
+            fileStream.close()
+            if (fs.existsSync(tempCachePath)) fs.unlinkSync(tempCachePath)
+            downloadingLocks.delete(id)
+          })
+        } else {
+          downloadingLocks.delete(id)
+        }
+      }).on('error', (err) => {
+        console.error('[Cache] Download error:', err.message)
+        downloadingLocks.delete(id)
+        if (fs.existsSync(tempCachePath)) fs.unlinkSync(tempCachePath)
+      })
+    }
+
+    // 4. Stream to user directly
     const options = {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
@@ -645,6 +759,158 @@ app.get('/api/stream/:id', async (req, res) => {
     }
   }
 })
+
+// ===== Precache next song =====
+app.get('/api/precache/:id', async (req, res) => {
+  const id = req.params.id;
+  const cacheFilePath = path.join(CACHE_DIR, `${id}.audio`);
+  
+  if (fs.existsSync(cacheFilePath) || downloadingLocks.has(id)) {
+    return res.json({ status: 'already_cached_or_downloading' });
+  }
+
+  res.json({ status: 'started' });
+
+  try {
+    let directUrl = urlCache.get(id);
+    if (!directUrl) {
+      directUrl = await extractPrimary(id);
+      urlCache.set(id, directUrl);
+      setTimeout(() => urlCache.delete(id), 5 * 60 * 1000);
+    }
+    
+    const tempCachePath = path.join(CACHE_DIR, `${id}.audio.download`);
+    if (!downloadingLocks.has(id)) {
+      downloadingLocks.add(id);
+      const downloadOptions = {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+        }
+      };
+      https.get(directUrl, downloadOptions, (downloadRes) => {
+        if (downloadRes.statusCode === 200) {
+          const fileStream = fs.createWriteStream(tempCachePath);
+          downloadRes.pipe(fileStream);
+          fileStream.on('finish', () => {
+            fileStream.close(() => {
+              try {
+                if (fs.existsSync(tempCachePath)) {
+                  fs.renameSync(tempCachePath, cacheFilePath);
+                  console.log(`[Cache] Precached ${id}`);
+                }
+              } catch (e) {}
+              downloadingLocks.delete(id);
+            });
+          });
+          downloadRes.on('error', () => {
+            fileStream.close();
+            if (fs.existsSync(tempCachePath)) fs.unlinkSync(tempCachePath);
+            downloadingLocks.delete(id);
+          });
+        } else {
+          downloadingLocks.delete(id);
+        }
+      }).on('error', (err) => {
+        console.error('[Cache] Precache download error:', err.message);
+        downloadingLocks.delete(id);
+        if (fs.existsSync(tempCachePath)) fs.unlinkSync(tempCachePath);
+      });
+    }
+  } catch (err) {
+    console.warn(`[Cache] Precache failed for ${id}:`, err.message);
+  }
+});
+
+// ===== Fetch Playlist =====
+app.get('/api/playlist', async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ error: 'Missing playlist URL' });
+
+  try {
+    let playlistId = url;
+    // Extract ID if URL is provided
+    try {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.searchParams.has('list')) {
+        playlistId = parsedUrl.searchParams.get('list');
+      }
+    } catch (e) {
+      // Not a valid URL, assume it's an ID
+    }
+
+    // Primary: YTMusic API
+    if (await ensureYTMusic()) {
+      try {
+        const playlist = await ytmusic.getPlaylist(playlistId);
+        if (playlist && playlist.videos && playlist.videos.length > 0) {
+          const tracks = playlist.videos.map(v => ({
+            id: v.videoId || v.id,
+            title: v.name || v.title || '',
+            artist: (v.artists && v.artists.map(a => a.name).join(', ')) || v.artist?.name || '',
+            thumbnail: getBestThumbnail(v.thumbnails, v.videoId || v.id) || `https://i.ytimg.com/vi/${v.videoId || v.id}/hqdefault.jpg`,
+            duration: v.duration ? (typeof v.duration === 'number' ? v.duration : parseDuration(v.duration)) : 0,
+          }));
+          return res.json({ id: playlist.playlistId || playlistId, title: playlist.name || 'Imported Playlist', tracks });
+        }
+      } catch (err) {
+        console.warn(`[Playlist] YTMusic failed:`, err.message?.slice(0, 80));
+      }
+    }
+
+    // Fallback: youtube-sr
+    const playlist = await YouTube.getPlaylist(url);
+    if (!playlist) return res.status(404).json({ error: 'Playlist not found' });
+    
+    // Fetch all tracks if it's a large playlist (youtube-sr handles pagination implicitly or via fetch)
+    const tracks = (playlist.videos || []).map(v => mapYouTubeSrTrack(v));
+    res.json({ id: playlist.id || playlistId, title: playlist.title || 'Imported Playlist', tracks });
+  } catch (err) {
+    console.error('Playlist error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== Get Lyrics =====
+app.get('/api/lyrics/:videoId', async (req, res) => {
+  const { videoId } = req.params;
+  try {
+    if (await ensureYTMusic()) {
+      const lyrics = await ytmusic.getLyrics(videoId);
+      return res.json(lyrics || []);
+    }
+    res.json([]);
+  } catch (err) {
+    console.error('Lyrics error:', err.message);
+    res.status(500).json([]);
+  }
+});
+
+// ===== Get Up Next Recommendations =====
+app.get('/api/upnext/:videoId', async (req, res) => {
+  const { videoId } = req.params;
+  try {
+    if (await ensureYTMusic()) {
+      const upNexts = await ytmusic.getUpNexts(videoId);
+      if (upNexts && Array.isArray(upNexts)) {
+        const mapped = upNexts.map(song => {
+          const vId = song.videoId || song.id || '';
+          return {
+            id: vId,
+            title: song.title || song.name || '',
+            artist: song.artists || (song.artist?.name || ''),
+            thumbnail: getBestThumbnail(song.thumbnails, vId) || `https://i.ytimg.com/vi/${vId}/hqdefault.jpg`,
+            duration: song.duration ? (typeof song.duration === 'number' ? song.duration : parseDuration(song.duration)) : 0,
+          };
+        });
+        return res.json(filterMashups(mapped, 'upnext-dedicated'));
+      }
+    }
+    res.json([]);
+  } catch (err) {
+    console.error('UpNext error:', err.message);
+    res.status(500).json([]);
+  }
+});
 
 // ===== Boot =====
 async function boot() {

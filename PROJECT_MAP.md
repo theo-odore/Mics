@@ -12,7 +12,6 @@ This document serves as a comprehensive guide for AI models and developers to un
 - **Search**: Direct integration with YouTube Music's database.
 - **Trending**: Real-time trending tracks from global charts.
 - **Ambient UI**: A dynamic background system that extracts colors from album art to create a glassmorphism/ambient effect.
-- **Mobile Ready**: Built with Capacitor to run as a native Android app.
 
 ---
 
@@ -30,9 +29,6 @@ This document serves as a comprehensive guide for AI models and developers to un
 - **youtube-dl-exec (yt-dlp)**: Primary engine for audio stream extraction.
 - **Puppeteer (Stealth)**: Fallback engine for stream extraction when scraping is blocked.
 - **FFmpeg**: Spawns a process to transcode raw streams into high-quality MP3 (192k).
-
-### Mobile/Native:
-- **Capacitor**: Bridges the web app to native Android APIs.
 
 ---
 
@@ -58,7 +54,6 @@ Since YouTube images have strict CORS policies, the server provides an `/api/ima
 
 ```text
 /
-├── android/               # Native Android project (Capacitor)
 ├── src/
 │   ├── App.jsx            # Main React Component: UI, Audio Engine, State
 │   ├── assets/            # Static assets
@@ -67,8 +62,6 @@ Since YouTube images have strict CORS policies, the server provides an `/api/ima
 │   └── main.ts            # Vite entry point (TS variant)
 ├── public/                # Static public files
 ├── server.js              # Express Backend: API, Streaming logic, Transcoding
-├── 1777065231865-player-script.js # External/Obfuscated player dependency
-├── capacitor.config.json  # Mobile build configuration
 ├── package.json           # Dependencies (React, Express, yt-dlp, Puppeteer)
 └── vite.config.js         # Frontend build configuration
 ```
